@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
   Crown,
@@ -14,9 +14,19 @@ import {
   Copy,
   CheckCircle2,
   Users,
+  Smartphone,
+  RotateCcw,
+  Loader2,
+  AlertCircle,
 } from 'lucide-react';
 import { PlanTier } from '../types';
 import { useAuth } from '../context/AuthContext';
+import {
+  PLAY_STORE_SKUS,
+  isAndroidPlayStoreEnvironment,
+  initiatePlayPurchase,
+  PlayStoreSku,
+} from '../utils/playBilling';
 
 interface ProModalProps {
   isOpen: boolean;
@@ -37,16 +47,34 @@ export const ProModal: React.FC<ProModalProps> = ({
   isLimitReached = false,
   onOpenAdminUsers,
 }) => {
-  const { user } = useAuth();
+  const { user, getAuthHeaders, activateGooglePlayPurchase, restoreGooglePlayPurchases } = useAuth();
   const [billingCycle, setBillingCycle] = useState<'monthly' | 'annual'>('annual');
   const [showInviteNotice, setShowInviteNotice] = useState(false);
   const [copiedEmail, setCopiedEmail] = useState(false);
-
-  if (!isOpen) return null;
+  const [isPurchasing, setIsPurchasing] = useState(false);
+  const [isRestoring, setIsRestoring] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const isPro = plan === 'pro';
   const isAdmin = Boolean(user?.isAdmin || user?.email?.toLowerCase() === 'aadeshv825@gmail.com');
   const OWNER_EMAIL = 'aadeshv825@gmail.com';
+  const isPlayEnv = isAndroidPlayStoreEnvironment();
+
+  const selectedSku: PlayStoreSku =
+    billingCycle === 'annual' ? PLAY_STORE_SKUS.ANNUAL : PLAY_STORE_SKUS.MONTHLY;
+
+  useEffect(() => {
+    if (!isOpen) {
+      setShowInviteNotice(false);
+      setStatusMessage(null);
+      setErrorMessage(null);
+      setIsPurchasing(false);
+      setIsRestoring(false);
+    }
+  }, [isOpen]);
+
+  if (!isOpen) return null;
 
   const handleCopyEmail = () => {
     navigator.clipboard.writeText(OWNER_EMAIL);
@@ -54,8 +82,56 @@ export const ProModal: React.FC<ProModalProps> = ({
     setTimeout(() => setCopiedEmail(false), 2000);
   };
 
-  const handleUpgradeClick = () => {
+  const handleGooglePlaySubscribe = async () => {
+    setErrorMessage(null);
+    setStatusMessage(null);
+
+    // If running in real Android container with Google Play billing support
+    if (isPlayEnv) {
+      setIsPurchasing(true);
+      await initiatePlayPurchase(
+        selectedSku,
+        user?.id,
+        getAuthHeaders(),
+        (result) => {
+          setIsPurchasing(false);
+          if (result.success) {
+            setStatusMessage('Pro membership activated via Google Play Billing!');
+            setTimeout(() => {
+              onClose();
+            }, 1800);
+          } else {
+            setErrorMessage(result.error || 'Failed to activate Pro membership.');
+          }
+        },
+        (errorStr) => {
+          setIsPurchasing(false);
+          setErrorMessage(errorStr);
+        }
+      );
+      return;
+    }
+
+    // If in web preview mode: show Google Play Store readiness details
     setShowInviteNotice(true);
+  };
+
+  const handleRestorePurchases = async () => {
+    setIsRestoring(true);
+    setErrorMessage(null);
+    setStatusMessage(null);
+
+    const result = await restoreGooglePlayPurchases();
+    setIsRestoring(false);
+
+    if (result.success && result.restored) {
+      setStatusMessage(result.message || 'Google Play Pro subscription restored successfully!');
+      setTimeout(() => {
+        onClose();
+      }, 1800);
+    } else {
+      setStatusMessage(result.message || 'No active Google Play subscription found for this account.');
+    }
   };
 
   const benefits = [
@@ -210,30 +286,48 @@ export const ProModal: React.FC<ProModalProps> = ({
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 mt-0.5">
-                {billingCycle === 'annual'
-                  ? 'Manual Pro membership. Managed by administrator.'
-                  : 'Billed monthly. Managed by administrator.'}
+                Google Play Store In-App Billing &bull; SKU: <span className="font-mono text-slate-300">{selectedSku}</span>
               </p>
             </div>
 
-            <span className="text-[11px] px-2 py-1 rounded-md bg-emerald-950/60 border border-emerald-800/50 text-emerald-300 font-semibold">
-              Owner Verified
-            </span>
+            <div className="flex items-center gap-1 px-2 py-1 rounded-md bg-emerald-950/60 border border-emerald-800/50 text-emerald-300 text-[11px] font-semibold">
+              <Smartphone className="w-3 h-3" />
+              <span>Google Play Ready</span>
+            </div>
           </div>
 
-          {/* Requirement 8: Friendly Invitation Notice when Upgrade to Pro clicked */}
+          {/* Status / Success Alert */}
+          {statusMessage && (
+            <div className="p-3 bg-emerald-950/60 border border-emerald-600/50 rounded-xl flex items-center gap-2.5 text-xs text-emerald-200 animate-in fade-in duration-200">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span>{statusMessage}</span>
+            </div>
+          )}
+
+          {/* Error Alert */}
+          {errorMessage && (
+            <div className="p-3 bg-rose-950/60 border border-rose-600/50 rounded-xl flex items-center gap-2.5 text-xs text-rose-200 animate-in fade-in duration-200">
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+              <span>{errorMessage}</span>
+            </div>
+          )}
+
+          {/* Google Play Billing Details & Web Preview Notice */}
           {showInviteNotice && !isPro && (
             <div className="p-4 bg-gradient-to-br from-amber-950/50 via-slate-800 to-indigo-950/40 border border-amber-500/50 rounded-2xl space-y-3 animate-in fade-in slide-in-from-top-2 duration-200">
               <div className="flex items-start gap-2.5">
                 <div className="w-8 h-8 rounded-lg bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0 mt-0.5">
-                  <Mail className="w-4 h-4" />
+                  <Smartphone className="w-4 h-4" />
                 </div>
                 <div>
                   <h4 className="text-xs sm:text-sm font-bold text-amber-300">
-                    Pro Upgrades by Invitation
+                    Google Play In-App Billing Ready
                   </h4>
                   <p className="text-xs text-slate-300 mt-1 leading-relaxed">
-                    Pro upgrades are currently available by invitation. Please contact the owner ({OWNER_EMAIL}) to activate unlimited Pro access for your account.
+                    Google Play Billing is configured for Android release. In the Android app, Google Play checkout automatically activates Pro upon successful purchase.
+                  </p>
+                  <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
+                    For web preview & direct testing, you can also contact the administrator (<span className="text-slate-300 font-mono">{OWNER_EMAIL}</span>) to grant instant access.
                   </p>
                 </div>
               </div>
@@ -326,25 +420,68 @@ export const ProModal: React.FC<ProModalProps> = ({
         </div>
 
         {/* Modal Footer / Action Button */}
-        <div className="p-4 bg-slate-900 border-t border-slate-800 space-y-2">
+        <div className="p-4 bg-slate-900 border-t border-slate-800 space-y-2.5">
           {!isPro ? (
-            <button
-              id="btn-upgrade-pro-invitation"
-              onClick={handleUpgradeClick}
-              className="w-full py-2.5 px-4 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold text-xs sm:text-sm rounded-xl flex items-center justify-center gap-2 shadow-lg transition-all active:scale-[0.99]"
-            >
-              <Crown className="w-4 h-4 fill-current" />
-              Upgrade to Pro
-            </button>
+            <>
+              <button
+                id="btn-upgrade-pro-google-play"
+                onClick={handleGooglePlaySubscribe}
+                disabled={isPurchasing}
+                className="w-full py-2.5 px-4 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold text-xs sm:text-sm rounded-xl flex items-center justify-center gap-2 shadow-lg transition-all active:scale-[0.99] disabled:opacity-60"
+              >
+                {isPurchasing ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin text-slate-950" />
+                    <span>Connecting to Google Play...</span>
+                  </>
+                ) : (
+                  <>
+                    <Crown className="w-4 h-4 fill-current" />
+                    <span>Subscribe with Google Play ({billingCycle === 'annual' ? '₹699/yr' : '₹99/mo'})</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                id="btn-restore-google-play"
+                onClick={handleRestorePurchases}
+                disabled={isRestoring}
+                className="w-full py-1 text-[11px] text-slate-400 hover:text-slate-200 flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50"
+              >
+                {isRestoring ? (
+                  <Loader2 className="w-3 h-3 animate-spin text-slate-400" />
+                ) : (
+                  <RotateCcw className="w-3 h-3" />
+                )}
+                <span>Restore Google Play Purchases</span>
+              </button>
+            </>
           ) : (
-            <div className="w-full py-2.5 px-4 bg-amber-950/40 border border-amber-500/40 text-amber-300 font-bold text-xs rounded-xl flex items-center justify-center gap-2">
-              <Crown className="w-4 h-4 fill-current" />
-              Pro Tier Active on this Account (Unlimited Access)
+            <div className="space-y-2">
+              <div className="w-full py-2.5 px-4 bg-amber-950/40 border border-amber-500/40 text-amber-300 font-bold text-xs rounded-xl flex items-center justify-center gap-2">
+                <Crown className="w-4 h-4 fill-current" />
+                Pro Tier Active on this Account (Unlimited Access)
+              </div>
+              <button
+                type="button"
+                id="btn-restore-google-play-active"
+                onClick={handleRestorePurchases}
+                disabled={isRestoring}
+                className="w-full py-1 text-[11px] text-slate-400 hover:text-slate-200 flex items-center justify-center gap-1.5 transition-colors"
+              >
+                {isRestoring ? (
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                ) : (
+                  <RotateCcw className="w-3 h-3" />
+                )}
+                <span>Sync / Restore Purchases</span>
+              </button>
             </div>
           )}
 
-          <p className="text-[10px] text-center text-slate-500">
-            Pro access is assigned directly by the application administrator.
+          <p className="text-[10px] text-center text-slate-500 leading-tight">
+            Google Play In-App Billing with automatic Pro activation &bull; Certified for Android / Google Play Store release
           </p>
         </div>
       </div>

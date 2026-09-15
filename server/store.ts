@@ -18,6 +18,19 @@ export interface StoredUser {
   preferredLanguage?: string;
 }
 
+export interface GooglePlayPurchaseRecord {
+  id: string;
+  userId: string;
+  purchaseToken: string;
+  sku: string;
+  orderId?: string;
+  packageName?: string;
+  purchaseTime: number;
+  expiryTime?: number;
+  state: 'VERIFIED' | 'EXPIRED' | 'CANCELLED';
+  verifiedAt: number;
+}
+
 export interface StoredDocument {
   id: string;
   userId: string;
@@ -42,6 +55,7 @@ const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 const DOCUMENTS_FILE = path.join(DATA_DIR, 'documents.json');
 const USAGE_FILE = path.join(DATA_DIR, 'usage.json');
+const PURCHASES_FILE = path.join(DATA_DIR, 'purchases.json');
 
 // Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)) {
@@ -73,6 +87,7 @@ let users: StoredUser[] = readJsonFile<StoredUser[]>(USERS_FILE, []);
 let sessions: StoredSession[] = readJsonFile<StoredSession[]>(SESSIONS_FILE, []);
 let documents: StoredDocument[] = readJsonFile<StoredDocument[]>(DOCUMENTS_FILE, []);
 let usageMap: Record<string, number> = readJsonFile<Record<string, number>>(USAGE_FILE, {});
+let purchases: GooglePlayPurchaseRecord[] = readJsonFile<GooglePlayPurchaseRecord[]>(PURCHASES_FILE, []);
 
 // App owner & admin email
 export const OWNER_EMAIL = (process.env.OWNER_EMAIL || 'aadeshv825@gmail.com').toLowerCase();
@@ -476,4 +491,43 @@ export function incrementDailyUsage(identifier: string): number {
   usageMap[key] = current + 1;
   writeJsonFile(USAGE_FILE, usageMap);
   return usageMap[key];
+}
+
+// -------------------------------------------------------------
+// GOOGLE PLAY BILLING PURCHASE STORE
+// -------------------------------------------------------------
+
+export const GOOGLE_PLAY_SKUS = {
+  MONTHLY: 'ai_doc_pro_monthly',
+  ANNUAL: 'ai_doc_pro_annual',
+  LIFETIME: 'ai_doc_pro_lifetime',
+} as const;
+
+export function isValidGooglePlaySku(sku: string): boolean {
+  return Object.values(GOOGLE_PLAY_SKUS).includes(sku as any);
+}
+
+export function findGooglePlayPurchaseByToken(purchaseToken: string): GooglePlayPurchaseRecord | null {
+  if (!purchaseToken) return null;
+  return purchases.find((p) => p.purchaseToken === purchaseToken) || null;
+}
+
+export function getUserGooglePlayPurchases(userId: string): GooglePlayPurchaseRecord[] {
+  return purchases.filter((p) => p.userId === userId);
+}
+
+export function getAllGooglePlayPurchases(): GooglePlayPurchaseRecord[] {
+  return [...purchases];
+}
+
+export function recordGooglePlayPurchase(record: GooglePlayPurchaseRecord): GooglePlayPurchaseRecord {
+  // Update or insert
+  const idx = purchases.findIndex((p) => p.purchaseToken === record.purchaseToken);
+  if (idx >= 0) {
+    purchases[idx] = record;
+  } else {
+    purchases.unshift(record);
+  }
+  writeJsonFile(PURCHASES_FILE, purchases);
+  return record;
 }

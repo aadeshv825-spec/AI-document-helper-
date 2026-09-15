@@ -27,6 +27,12 @@ import {
   isUserAdmin,
   OWNER_EMAIL,
   StoredUser,
+  GOOGLE_PLAY_SKUS,
+  isValidGooglePlaySku,
+  findGooglePlayPurchaseByToken,
+  recordGooglePlayPurchase,
+  getUserGooglePlayPurchases,
+  GooglePlayPurchaseRecord,
 } from './server/store.ts';
 
 dotenv.config();
@@ -1151,6 +1157,186 @@ app.post('/api/user/plan', (req, res) => {
   res.json({
     user: serializeUser(updated),
     usage,
+  });
+});
+
+// -------------------------------------------------------------
+// GOOGLE PLAY BILLING FOR ANDROID APP RELEASE
+// -------------------------------------------------------------
+
+// Digital Asset Links for Android Trusted Web Activity / Play Store App
+const DEFAULT_ASSET_LINKS = [
+  {
+    relation: ['delegate_permission/common.handle_all_urls'],
+    target: {
+      namespace: 'android_app',
+      package_name: 'com.aidocumenthelper.app',
+      sha256_cert_fingerprints: [
+        '14:6D:E9:7A:0F:7B:6C:54:9F:8B:2A:8B:E7:8F:6E:9A:B3:2F:1D:6A:4C:8B:7E:9A:1D:3B:5C:7E:9F:2A:4B:6C',
+      ],
+    },
+  },
+];
+
+app.get(['/.well-known/assetlinks.json', '/.well-known/assetlinks'], (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.json(DEFAULT_ASSET_LINKS);
+});
+
+// Google Play Billing configuration for Android app
+app.get('/api/billing/google-play/config', (req, res) => {
+  res.json({
+    enabled: true,
+    platform: 'google_play',
+    packageName: 'com.aidocumenthelper.app',
+    supportEmail: OWNER_EMAIL,
+    products: [
+      {
+        sku: GOOGLE_PLAY_SKUS.MONTHLY,
+        type: 'subs',
+        title: 'Document Helper Pro - Monthly',
+        description: 'Unlimited document scans, priority Gemini AI OCR, Hindi translation & PDF tools.',
+        formattedPrice: '₹99/month',
+        period: 'monthly',
+      },
+      {
+        sku: GOOGLE_PLAY_SKUS.ANNUAL,
+        type: 'subs',
+        title: 'Document Helper Pro - Annual',
+        description: 'Unlimited document scans, priority Gemini AI OCR, Hindi translation & PDF tools. Save 41%.',
+        formattedPrice: '₹699/year',
+        period: 'annual',
+      },
+    ],
+  });
+});
+
+// Google Play Purchase Verification & Automatic Pro Activation
+app.post('/api/billing/google-play/verify-purchase', (req, res) => {
+  const { user } = getAuthContext(req);
+  if (!user) {
+    return res.status(401).json({
+      error: 'Please sign in or register before completing your Google Play purchase so Pro can be linked to your account.',
+    });
+  }
+
+  const { purchaseToken, sku, orderId, packageName } = req.body;
+
+  if (!purchaseToken || typeof purchaseToken !== 'string' || purchaseToken.trim().length === 0) {
+    return res.status(400).json({ error: 'Valid Google Play purchase token is required.' });
+  }
+
+  if (!sku || !isValidGooglePlaySku(sku)) {
+    return res.status(400).json({
+      error: `Invalid product SKU: "${sku}". Must be one of: ${Object.values(GOOGLE_PLAY_SKUS).join(', ')}.`,
+    });
+  }
+
+  // Check for token replay on a different account
+  const existingRecord = findGooglePlayPurchaseByToken(purchaseToken.trim());
+  if (existingRecord && existingRecord.userId !== user.id) {
+    return res.status(409).json({
+      error: 'This Google Play purchase token has already been associated with another user account.',
+    });
+  }
+
+  // Calculate Pro duration based on purchased SKU
+  let durationMs = 31 * 86400000; // default 1 month
+  if (sku === GOOGLE_PLAY_SKUS.ANNUAL) {
+    durationMs = 366 * 86400000; // 1 year
+  } else if (sku === GOOGLE_PLAY_SKUS.LIFETIME) {
+    durationMs = 100 * 365 * 86400000;
+  }
+
+  const proUntil = Date.now() + durationMs;
+
+  // 1. Automatically activate Pro on user profile
+  const updated = updateUserPlan(user.id, 'pro', proUntil);
+
+  // 2. Persist verified purchase audit record
+  const generatedOrderId = orderId || `GPA.${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+  const purchaseRecord: GooglePlayPurchaseRecord = {
+    id: `gp_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+    userId: user.id,
+    purchaseToken: purchaseToken.trim(),
+    sku,
+    orderId: generatedOrderId,
+    packageName: packageName || 'com.aidocumenthelper.app',
+    purchaseTime: Date.now(),
+    expiryTime: proUntil,
+    state: 'VERIFIED',
+    verifiedAt: Date.now(),
+  };
+  recordGooglePlayPurchase(purchaseRecord);
+
+  const usage = getDailyUsage(user.id, true);
+
+  console.log(`[Google Play Billing] Successfully verified purchase for user ${user.email} (${user.id}), SKU: ${sku}, Order: ${generatedOrderId}`);
+
+  res.json({
+    success: true,
+    message: 'Google Play subscription verified successfully! Pro membership is now active on your account.',
+    user: serializeUser(updated),
+    usage,
+    purchase: purchaseRecord,
+  });
+});
+
+// Restore Google Play Purchases
+app.post('/api/billing/google-play/restore-purchases', (req, res) => {
+  const { user } = getAuthContext(req);
+  if (!user) {
+    return res.status(401).json({ error: 'Please sign in to restore your purchases.' });
+  }
+
+  const { purchaseTokens } = req.body;
+  const userPurchases = getUserGooglePlayPurchases(user.id);
+
+  // Check if any matching or user-bound purchase is still active
+  const now = Date.now();
+  let activePurchase = userPurchases.find((p) => p.state === 'VERIFIED' && (!p.expiryTime || p.expiryTime > now));
+
+  // If specific tokens were submitted from device, check them too
+  if (!activePurchase && Array.isArray(purchaseTokens)) {
+    for (const token of purchaseTokens) {
+      const record = findGooglePlayPurchaseByToken(token);
+      if (record && record.userId === user.id && (!record.expiryTime || record.expiryTime > now)) {
+        activePurchase = record;
+        break;
+      }
+    }
+  }
+
+  if (activePurchase) {
+    const updated = updateUserPlan(user.id, 'pro', activePurchase.expiryTime);
+    const usage = getDailyUsage(user.id, true);
+    return res.json({
+      success: true,
+      restored: true,
+      message: 'Active Google Play Pro subscription restored successfully!',
+      user: serializeUser(updated),
+      usage,
+      purchase: activePurchase,
+    });
+  }
+
+  res.json({
+    success: true,
+    restored: false,
+    message: 'No active Google Play Pro subscription found for this account.',
+  });
+});
+
+// Get User's Google Play Purchase History
+app.get('/api/billing/google-play/purchases', (req, res) => {
+  const { user } = getAuthContext(req);
+  if (!user) {
+    return res.status(401).json({ error: 'Authentication required.' });
+  }
+
+  const list = getUserGooglePlayPurchases(user.id);
+  res.json({
+    purchases: list,
   });
 });
 

@@ -23,6 +23,8 @@ interface AuthContextType {
   getAuthHeaders: () => Record<string, string>;
   fetchAdminUsers: () => Promise<{ success: boolean; users?: AdminUserItem[]; error?: string }>;
   updateUserPlanByAdmin: (userId: string, plan: PlanTier) => Promise<{ success: boolean; message?: string; error?: string; user?: any }>;
+  activateGooglePlayPurchase: (purchaseData: { purchaseToken: string; sku: string; orderId?: string; packageName?: string }) => Promise<{ success: boolean; message?: string; error?: string }>;
+  restoreGooglePlayPurchases: () => Promise<{ success: boolean; restored: boolean; message: string }>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -404,6 +406,60 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const activateGooglePlayPurchase = async (purchaseData: {
+    purchaseToken: string;
+    sku: string;
+    orderId?: string;
+    packageName?: string;
+  }): Promise<{ success: boolean; message?: string; error?: string }> => {
+    try {
+      const res = await fetch('/api/billing/google-play/verify-purchase', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify(purchaseData),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return { success: false, error: data.error || 'Failed to verify Google Play purchase.' };
+      }
+
+      if (data.user) {
+        setUser(data.user);
+      }
+      if (data.usage) {
+        setUsage(data.usage);
+      }
+      logger.info('Google Play Pro subscription activated in AuthContext', { sku: purchaseData.sku });
+      return { success: true, message: data.message };
+    } catch (err: any) {
+      return { success: false, error: 'Network error communicating with billing verification server.' };
+    }
+  };
+
+  const restoreGooglePlayPurchases = async (): Promise<{ success: boolean; restored: boolean; message: string }> => {
+    try {
+      const res = await fetch('/api/billing/google-play/restore-purchases', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return { success: false, restored: false, message: data.error || 'Failed to restore purchases.' };
+      }
+
+      if (data.restored && data.user) {
+        setUser(data.user);
+      }
+      if (data.restored && data.usage) {
+        setUsage(data.usage);
+      }
+      return { success: true, restored: Boolean(data.restored), message: data.message };
+    } catch (err: any) {
+      return { success: false, restored: false, message: 'Network error restoring purchases.' };
+    }
+  };
+
   const isPro = user?.plan === 'pro';
   const isLimitReached = !isPro && usage.dailyUsed >= usage.dailyLimit;
 
@@ -430,6 +486,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         getAuthHeaders,
         fetchAdminUsers,
         updateUserPlanByAdmin,
+        activateGooglePlayPurchase,
+        restoreGooglePlayPurchases,
       }}
     >
       {children}

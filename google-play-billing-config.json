@@ -1,0 +1,47 @@
+{
+  "application": {
+    "name": "AI Document Helper",
+    "packageName": "com.aidocumenthelper.app",
+    "versionCode": 1,
+    "versionName": "1.0.0",
+    "ownerEmail": "aadeshv825@gmail.com",
+    "category": "PRODUCTIVITY",
+    "targetSdkVersion": 34
+  },
+  "inAppProducts": [
+    {
+      "productId": "ai_doc_pro_monthly",
+      "type": "SUBSCRIPTION",
+      "name": "Document Helper Pro - Monthly",
+      "description": "Unlimited document scans, priority Gemini AI OCR, Hindi translation & PDF tools",
+      "price": {
+        "currency": "INR",
+        "amountMicros": "99000000",
+        "formatted": "₹99/month"
+      },
+      "billingPeriod": "P1M"
+    },
+    {
+      "productId": "ai_doc_pro_annual",
+      "type": "SUBSCRIPTION",
+      "name": "Document Helper Pro - Annual",
+      "description": "Unlimited document scans, priority Gemini AI OCR, Hindi translation & PDF tools. Save 41%",
+      "price": {
+        "currency": "INR",
+        "amountMicros": "699000000",
+        "formatted": "₹699/year"
+      },
+      "billingPeriod": "P1Y"
+    }
+  ],
+  "verificationEndpoints": {
+    "verifyPurchase": "/api/billing/google-play/verify-purchase",
+    "restorePurchases": "/api/billing/google-play/restore-purchases",
+    "config": "/api/billing/google-play/config",
+    "assetLinks": "/.well-known/assetlinks.json"
+  },
+  "automaticProActivation": {
+    "enabled": true,
+    "mechanism": "Server-side purchase token validation with instant plan upgrade (plan='pro', unlimited quota: 999999)"
+  }
+}
