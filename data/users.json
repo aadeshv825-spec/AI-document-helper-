@@ -1,0 +1,37 @@
+[
+  {
+    "id": "user_demo_1",
+    "name": "Aadesh V",
+    "email": "aadeshv825@gmail.com",
+    "passwordHash": "f26497326503919fa95c9934c6ca98d1268f6e25f0fef7cc4098f59a9af9e4b26af9015cd127597d2035c3f628748be9d9347e48f12db00eef2977afea699cf1",
+    "salt": "e0e3e756e2257263ef665a75aca54fa7",
+    "plan": "free",
+    "createdAt": 1788683072177,
+    "preferredLanguage": "English",
+    "googleId": "google_oauth_demo_119321813297",
+    "avatarUrl": "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120&auto=format&fit=crop&q=80",
+    "authProvider": "google",
+    "role": "admin"
+  },
+  {
+    "id": "user_client_102",
+    "name": "Rahul Sharma",
+    "email": "rahul.sharma@example.com",
+    "passwordHash": "489148922d666e419a75f370938622551d9533cefd0242eea99b1346217bcb67b585a31779f53a18de186b58a756bd3833a42be76f235712b4948ece8316b0ab",
+    "salt": "944d326c12ce25cae2f400a5cf4902e0",
+    "plan": "free",
+    "role": "user",
+    "createdAt": 1789131255234,
+    "preferredLanguage": "Hindi"
+  },
+  {
+    "id": "user_1789304081281_19d6fce4",
+    "name": "Priya NonAdmin",
+    "email": "priya@example.com",
+    "passwordHash": "19bbe1b450ebd6110c7eb837dee425f0c54d6a46ed7bb09bb48ea289856b581173b58f2e4d55292eaf581637b879478327d8d70f2f26328b08122420ae5c1ef3",
+    "salt": "2ef981eb80ac3cfce1e881678f96c5d9",
+    "plan": "free",
+    "createdAt": 1789304081281,
+    "preferredLanguage": "English"
+  }
+]

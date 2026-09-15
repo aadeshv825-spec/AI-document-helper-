@@ -1,0 +1,6 @@
+{
+  "name": "AI Document Helper",
+  "description": "Mobile-friendly AI document assistant for Scan & Clean, PDF Tools, Photo to Text, PDF Summary, Document Q&A, Hindi-English Translation, and AI Writing.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
