@@ -52,7 +52,7 @@ export const Header: React.FC<HeaderProps> = ({
   const isAdmin = Boolean(user?.isAdmin || user?.email?.toLowerCase() === 'aadeshv825@gmail.com');
 
   return (
-    <header className="sticky top-0 z-30 w-full bg-slate-900/95 backdrop-blur border-b border-slate-800 px-3 sm:px-4 py-2.5">
+    <header className="sticky top-0 z-30 w-full bg-slate-900/95 backdrop-blur border-b border-slate-800 px-3 sm:px-4 py-2.5 pt-safe">
       <div className="max-w-2xl mx-auto flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           {activeTab !== 'home' ? (

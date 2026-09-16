@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">AI Document Helper</string>
+    <string name="package_name">com.aidocumenthelper.app</string>
+    <string name="pro_monthly_sku">ai_doc_pro_monthly</string>
+    <string name="pro_annual_sku">ai_doc_pro_annual</string>
+</resources>

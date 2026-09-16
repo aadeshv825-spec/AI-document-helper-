@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="primary">#4f46e5</color>
+    <color name="primary_dark">#3730a3</color>
+    <color name="accent">#f59e0b</color>
+    <color name="background">#0f172a</color>
+    <color name="surface">#1e293b</color>
+    <color name="status_bar">#0f172a</color>
+    <color name="navigation_bar">#0f172a</color>
+</resources>

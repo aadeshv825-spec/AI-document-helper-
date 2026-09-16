@@ -1172,6 +1172,7 @@ const DEFAULT_ASSET_LINKS = [
       namespace: 'android_app',
       package_name: 'com.aidocumenthelper.app',
       sha256_cert_fingerprints: [
+        'A3:6E:D2:90:95:41:40:7C:79:D9:03:F3:AB:54:6D:0D:C4:4A:99:9D:4B:84:DC:74:78:2C:D1:A3:85:96:48:F3',
         '14:6D:E9:7A:0F:7B:6C:54:9F:8B:2A:8B:E7:8F:6E:9A:B3:2F:1D:6A:4C:8B:7E:9A:1D:3B:5C:7E:9F:2A:4B:6C',
       ],
     },
@@ -1476,6 +1477,12 @@ app.post('/api/documents/sync', (req, res) => {
 
   const synced = syncUserDocuments(user.id, clientDocs);
   res.json({ documents: synced });
+});
+
+// Direct export endpoints for Android project & App Bundle assets
+app.get('/api/android/download-project', (req, res) => {
+  const zipPath = path.join(process.cwd(), 'public', 'android-project.zip');
+  res.download(zipPath, 'ai-document-helper-android-project.zip');
 });
 
 // Vite middleware setup

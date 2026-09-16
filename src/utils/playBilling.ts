@@ -39,7 +39,14 @@ declare global {
       launchBillingFlow?: (sku: string, accountId?: string) => void | Promise<any>;
       queryPurchases?: () => string | Promise<string>;
     };
-    AndroidBridge?: any;
+    AndroidBridge?: {
+      isAndroid?: () => boolean;
+      getAppVersion?: () => string;
+      vibrate?: (durationMs: number) => void;
+      showToast?: (message: string) => void;
+      shareText?: (title: string, text: string) => void;
+      copyToClipboard?: (text: string) => void;
+    };
     isPlayStoreApp?: boolean;
     getDigitalGoodsService?: (serviceProvider: string) => Promise<any>;
     onGooglePlayPurchaseCompleted?: (purchaseData: any) => void;

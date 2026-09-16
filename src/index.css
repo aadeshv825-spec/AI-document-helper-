@@ -4,6 +4,9 @@
   .pb-safe {
     padding-bottom: env(safe-area-inset-bottom, 1rem);
   }
+  .pt-safe {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
   .no-scrollbar::-webkit-scrollbar {
     display: none;
   }
@@ -13,9 +16,14 @@
   }
 }
 
+html, body {
+  overscroll-behavior-y: contain;
+}
+
 body {
   font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
   -webkit-tap-highlight-color: transparent;
+  user-select: auto;
 }
 
 /* Devanagari text styling */

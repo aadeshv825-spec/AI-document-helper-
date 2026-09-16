@@ -22,6 +22,7 @@ import { SAMPLE_DOCUMENTS } from './data/sampleDocuments';
 import { useAuth } from './context/AuthContext';
 import { apiFetch } from './utils/apiClient';
 import { logger } from './utils/logger';
+import { triggerHaptic } from './utils/android';
 
 export default function App() {
   const { user, usage, isLimitReached, updatePlan, refreshUsage, getAuthHeaders } = useAuth();
@@ -81,6 +82,87 @@ export default function App() {
     window.addEventListener('ai_limit_reached', handleQuotaReached);
     return () => window.removeEventListener('ai_limit_reached', handleQuotaReached);
   }, [refreshUsage]);
+
+  // Native Android hardware back button handler
+  useEffect(() => {
+    const handleAndroidBack = (e?: Event): boolean => {
+      // 1. Close modals in order of presence
+      if (isProModalOpen) {
+        setIsProModalOpen(false);
+        e?.preventDefault();
+        return true;
+      }
+      if (isAuthModalOpen) {
+        setIsAuthModalOpen(false);
+        e?.preventDefault();
+        return true;
+      }
+      if (isProfileModalOpen) {
+        setIsProfileModalOpen(false);
+        e?.preventDefault();
+        return true;
+      }
+      if (isSettingsModalOpen) {
+        setIsSettingsModalOpen(false);
+        e?.preventDefault();
+        return true;
+      }
+      if (isAdminUsersModalOpen) {
+        setIsAdminUsersModalOpen(false);
+        e?.preventDefault();
+        return true;
+      }
+      if (isAboutModalOpen || isHelpModalOpen || isPrivacyModalOpen || isTermsModalOpen) {
+        setIsAboutModalOpen(false);
+        setIsHelpModalOpen(false);
+        setIsPrivacyModalOpen(false);
+        setIsTermsModalOpen(false);
+        e?.preventDefault();
+        return true;
+      }
+      if (isOnboardingModalOpen) {
+        setIsOnboardingModalOpen(false);
+        e?.preventDefault();
+        return true;
+      }
+      // 2. Close history drawer
+      if (isHistoryOpen) {
+        setIsHistoryOpen(false);
+        e?.preventDefault();
+        return true;
+      }
+      // 3. Return to Home tab from subtool
+      if (activeTab !== 'home') {
+        setActiveTab('home');
+        e?.preventDefault();
+        return true;
+      }
+
+      // If at home with no modals, allow native Android exit
+      return false;
+    };
+
+    window.onAndroidBackPressed = () => handleAndroidBack();
+    window.addEventListener('androidBackButtonPressed', handleAndroidBack as any);
+
+    return () => {
+      delete window.onAndroidBackPressed;
+      window.removeEventListener('androidBackButtonPressed', handleAndroidBack as any);
+    };
+  }, [
+    isProModalOpen,
+    isAuthModalOpen,
+    isProfileModalOpen,
+    isSettingsModalOpen,
+    isAdminUsersModalOpen,
+    isAboutModalOpen,
+    isHelpModalOpen,
+    isPrivacyModalOpen,
+    isTermsModalOpen,
+    isOnboardingModalOpen,
+    isHistoryOpen,
+    activeTab,
+  ]);
 
   // Theme state persisted in localStorage
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {

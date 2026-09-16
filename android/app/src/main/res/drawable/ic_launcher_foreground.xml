@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Document Page Outline -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,26 C35.79,26 34,27.79 34,30 L34,78 C34,80.21 35.79,82 38,82 L70,82 C72.21,82 74,80.21 74,78 L74,42 L58,26 L38,26 Z" />
+    <!-- Folded Corner -->
+    <path
+        android:fillColor="#E0E7FF"
+        android:pathData="M58,26 L58,42 L74,42 Z" />
+    <!-- AI Scanner Spark / Beam Lines -->
+    <path
+        android:fillColor="#4F46E5"
+        android:pathData="M42,48 L54,48 A2,2 0 0 1 54,52 L42,52 A2,2 0 0 1 42,48 Z" />
+    <path
+        android:fillColor="#6366F1"
+        android:pathData="M42,56 L66,56 A2,2 0 0 1 66,60 L42,60 A2,2 0 0 1 42,56 Z" />
+    <path
+        android:fillColor="#6366F1"
+        android:pathData="M42,64 L62,64 A2,2 0 0 1 62,68 L42,68 A2,2 0 0 1 42,64 Z" />
+    <!-- Golden AI Star -->
+    <path
+        android:fillColor="#F59E0B"
+        android:pathData="M70,66 L72,70 L76,70 L73,73 L74,77 L70,74 L66,77 L67,73 L64,70 L68,70 Z" />
+</vector>

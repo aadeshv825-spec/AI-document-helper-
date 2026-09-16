@@ -10,6 +10,7 @@ import {
   Files,
 } from 'lucide-react';
 import { ActiveTab } from '../types';
+import { triggerHaptic } from '../utils/android';
 
 interface BottomNavProps {
   activeTab: ActiveTab;
@@ -47,7 +48,10 @@ export const BottomNav: React.FC<BottomNavProps> = ({ activeTab, setActiveTab })
             <button
               key={item.id}
               id={`nav-btn-${item.id}`}
-              onClick={() => setActiveTab(item.id)}
+              onClick={() => {
+                triggerHaptic(20);
+                setActiveTab(item.id);
+              }}
               className={`flex flex-col items-center justify-center min-w-[56px] sm:flex-1 py-1 px-1 transition-all duration-150 relative shrink-0 ${
                 isActive
                   ? 'text-blue-400 font-semibold'
