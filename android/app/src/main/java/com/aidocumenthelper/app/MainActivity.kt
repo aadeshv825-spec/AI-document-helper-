@@ -30,8 +30,9 @@ class MainActivity : AppCompatActivity() {
     private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
     private var currentCameraPhotoUri: Uri? = null
 
-    // App URL - Defaults to local/production URL or asset bundled web
-    private val appUrl = "https://ais-dev-gq2p2ijj6ei7rg6rotit6q-119321813297.asia-southeast1.run.app"
+    // App URL - local bundled asset or fallback production URL
+    private val localAssetUrl = "file:///android_asset/public/index.html"
+    private var remoteUrl: String = ""
 
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
@@ -78,7 +79,15 @@ class MainActivity : AppCompatActivity() {
         setupWebView()
         setupBackHandler()
 
-        webView.loadUrl(appUrl)
+        // Read production web URL from resources if defined
+        try {
+            remoteUrl = getString(R.string.production_web_url)
+        } catch (e: Exception) {
+            Log.w(tag, "production_web_url string not found, using default local assets")
+        }
+
+        // Always load bundled local asset first to prevent white-screen on cold launch
+        webView.loadUrl(localAssetUrl)
     }
 
     private fun checkAndRequestPermissions() {
@@ -104,6 +113,8 @@ class MainActivity : AppCompatActivity() {
         settings.databaseEnabled = true
         settings.allowFileAccess = true
         settings.allowContentAccess = true
+        settings.allowFileAccessFromFileURLs = true
+        settings.allowUniversalAccessFromFileURLs = true
         settings.mediaPlaybackRequiresUserGesture = false
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
         settings.useWideViewPort = true
@@ -117,9 +128,11 @@ class MainActivity : AppCompatActivity() {
         // Inject Native Bridges
         val nativeBridge = NativeBridgeInterface(this)
         val playBillingBridge = PlayBillingManager(this, webView)
+        val googleSignInBridge = GoogleSignInManager(this, webView)
 
         webView.addJavascriptInterface(nativeBridge, "AndroidBridge")
         webView.addJavascriptInterface(playBillingBridge, "AndroidPlayBilling")
+        webView.addJavascriptInterface(googleSignInBridge, "AndroidGoogleSignIn")
 
         webView.webChromeClient = object : WebChromeClient() {
             override fun onPermissionRequest(request: PermissionRequest) {
@@ -164,7 +177,14 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
-                Log.e(tag, "WebView error loading: ${error?.description}")
+                val failingUrl = request?.url?.toString() ?: ""
+                Log.e(tag, "WebView error loading $failingUrl: ${error?.description}")
+
+                // If remote network load failed and we aren't already on local assets, fallback to local bundled assets immediately
+                if (request?.isForMainFrame == true && failingUrl.startsWith("http") && localAssetUrl.isNotEmpty()) {
+                    Log.i(tag, "Failing over to local bundled assets: $localAssetUrl")
+                    view?.loadUrl(localAssetUrl)
+                }
             }
         }
     }

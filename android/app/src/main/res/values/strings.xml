@@ -1,6 +1,11 @@
 <resources>
     <string name="app_name">AI Document Helper</string>
     <string name="package_name">com.aidocumenthelper.app</string>
+    <string name="production_web_url">https://ais-dev-gq2p2ijj6ei7rg6rotit6q-119321813297.asia-southeast1.run.app</string>
+    <!-- Google OAuth 2.0 Web Client ID for Credential Manager serverClientId & backend token verification -->
+    <string name="default_web_client_id">358349564336-v9fq2to3b94q8482en0pt9f3b58scfgs.apps.googleusercontent.com</string>
+    <!-- Google OAuth 2.0 Android Client ID for package com.aidocumenthelper.app -->
+    <string name="android_client_id">358349564336-onvft9bdjre63q7gttnlbosfr3ll68ss.apps.googleusercontent.com</string>
     <string name="pro_monthly_sku">ai_doc_pro_monthly</string>
     <string name="pro_annual_sku">ai_doc_pro_annual</string>
 </resources>

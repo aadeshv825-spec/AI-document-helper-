@@ -1,6 +1,7 @@
 import React from 'react';
-import { FileText, Clock, Sparkles, ChevronLeft, Sun, Moon, Crown, Settings, User, ShieldCheck } from 'lucide-react';
+import { FileText, Clock, Sparkles, ChevronLeft, Sun, Moon, Crown, Settings, User, ShieldCheck, Search } from 'lucide-react';
 import { ActiveTab, PlanTier, UserProfile } from '../types';
+import { NetworkStatusBadge } from './NetworkStatusBadge';
 
 interface HeaderProps {
   activeTab: ActiveTab;
@@ -17,6 +18,7 @@ interface HeaderProps {
   onOpenAuth?: () => void;
   onOpenSettings?: () => void;
   onOpenAdminUsers?: () => void;
+  onOpenSearch?: () => void;
 }
 
 
@@ -46,6 +48,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenAuth,
   onOpenSettings,
   onOpenAdminUsers,
+  onOpenSearch,
 }) => {
   const current = TAB_TITLES[activeTab] || TAB_TITLES.home;
   const isPro = plan === 'pro';
@@ -85,6 +88,8 @@ export const Header: React.FC<HeaderProps> = ({
                   Ready
                 </span>
               )}
+              {/* Network / Offline Mode Indicator */}
+              <NetworkStatusBadge />
             </div>
             <p className="text-[11px] text-slate-400 truncate">
               {current.subtitle}
@@ -142,6 +147,19 @@ export const Header: React.FC<HeaderProps> = ({
             >
               <User className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">Sign In</span>
+            </button>
+          )}
+
+          {/* Global Search Trigger */}
+          {onOpenSearch && (
+            <button
+              id="header-global-search-btn"
+              onClick={onOpenSearch}
+              className="p-1.5 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded-lg transition-colors"
+              title="Search Documents & Tools"
+              aria-label="Search"
+            >
+              <Search className="w-4 h-4" />
             </button>
           )}
 

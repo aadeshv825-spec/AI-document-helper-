@@ -743,20 +743,6 @@ app.post('/api/auth/login', (req, res) => {
   }
 });
 
-app.post('/api/auth/demo-login', (req, res) => {
-  try {
-    const { user, token } = authenticateUser('aadeshv825@gmail.com', 'Password123!');
-    const usage = getDailyUsage(user.id, user.plan === 'pro');
-    res.json({
-      token,
-      user: serializeUser(user),
-      usage,
-    });
-  } catch (err: any) {
-    res.status(500).json({ error: 'Demo account currently unavailable.' });
-  }
-});
-
 // --- GOOGLE OAUTH 2.0 INTEGRATION ---
 interface OAuthStateData {
   redirectUri: string;
@@ -774,26 +760,28 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
+// Google OAuth 2.0 Client Credentials
+const GOOGLE_WEB_CLIENT_ID = (process.env.GOOGLE_CLIENT_ID || process.env.CLIENT_ID || '358349564336-v9fq2to3b94q8482en0pt9f3b58scfgs.apps.googleusercontent.com').trim();
+const GOOGLE_ANDROID_CLIENT_ID = '358349564336-onvft9bdjre63q7gttnlbosfr3ll68ss.apps.googleusercontent.com';
+
 // Status check for Google OAuth configuration
 app.get('/api/auth/google/status', (req, res) => {
-  const clientId = process.env.GOOGLE_CLIENT_ID || process.env.CLIENT_ID;
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET || process.env.CLIENT_SECRET;
-  const isConfigured = Boolean(clientId && clientSecret && clientId.trim() !== '' && clientSecret.trim() !== '');
+  const isConfigured = Boolean(GOOGLE_WEB_CLIENT_ID && clientSecret && clientSecret.trim() !== '');
   res.json({
     configured: isConfigured,
-    clientId: isConfigured && clientId ? `${clientId.slice(0, 12)}...` : null,
+    clientId: GOOGLE_WEB_CLIENT_ID,
   });
 });
 
 // Generate Google authorization URL with CSRF state
 app.get('/api/auth/google/url', (req, res) => {
-  const clientId = process.env.GOOGLE_CLIENT_ID || process.env.CLIENT_ID;
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET || process.env.CLIENT_SECRET;
 
-  if (!clientId || !clientSecret || clientId.trim() === '' || clientSecret.trim() === '') {
+  if (!GOOGLE_WEB_CLIENT_ID || !clientSecret || clientSecret.trim() === '') {
     return res.status(400).json({
       configured: false,
-      error: 'Google OAuth credentials (GOOGLE_CLIENT_ID & GOOGLE_CLIENT_SECRET) are not configured in environment settings.',
+      error: 'Google OAuth Web credentials (GOOGLE_CLIENT_ID & GOOGLE_CLIENT_SECRET) are not fully configured in environment settings.',
     });
   }
 
@@ -805,7 +793,7 @@ app.get('/api/auth/google/url', (req, res) => {
   googleOAuthStates.set(state, { redirectUri, createdAt: Date.now() });
 
   const params = new URLSearchParams({
-    client_id: clientId,
+    client_id: GOOGLE_WEB_CLIENT_ID,
     redirect_uri: redirectUri,
     response_type: 'code',
     scope: 'openid email profile',
@@ -822,23 +810,85 @@ app.get('/api/auth/google/url', (req, res) => {
   });
 });
 
-// Dedicated 1-click test Google login for instant verification
-app.post('/api/auth/google/demo', (req, res) => {
+// Official Native Android Credential Manager / Google Sign-In Token Exchange
+// Cryptographically verifies Google ID token with Google's official public key certificate tokeninfo service
+app.post('/api/auth/google/native', async (req, res) => {
   try {
+    const { idToken } = req.body;
+
+    if (!idToken || typeof idToken !== 'string' || idToken.trim().length === 0) {
+      return res.status(400).json({ error: 'Missing required Google ID token from Credential Manager.' });
+    }
+
+    // Cryptographic verification via Google's official tokeninfo endpoint
+    // Validates signature, expiry, and ensures token was minted by accounts.google.com
+    const verifyRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken.trim())}`);
+    if (!verifyRes.ok) {
+      const errData = await verifyRes.json().catch(() => ({}));
+      console.error('[GoogleAuth] Cryptographic ID token verification failed:', errData);
+      return res.status(401).json({
+        error: 'Google ID token verification failed. The provided token is invalid, expired, or untrusted.',
+      });
+    }
+
+    const payload = await verifyRes.json();
+
+    // Verify audience matches the configured WEB_CLIENT_ID (or Android client ID)
+    const validAudiences = [GOOGLE_WEB_CLIENT_ID, GOOGLE_ANDROID_CLIENT_ID];
+    const tokenAud = payload.aud;
+    if (!tokenAud || !validAudiences.includes(tokenAud)) {
+      console.error(`[GoogleAuth] Audience mismatch. Expected one of: ${validAudiences.join(', ')}, got: ${tokenAud}`);
+      return res.status(401).json({
+        error: 'Google token audience mismatch. Token was not minted for this application.',
+      });
+    }
+
+    // Verify issuer
+    const validIssuers = ['accounts.google.com', 'https://accounts.google.com'];
+    if (!payload.iss || !validIssuers.includes(payload.iss)) {
+      return res.status(401).json({ error: 'Google token issuer is untrusted.' });
+    }
+
+    // Verify expiration
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (payload.exp && Number(payload.exp) < nowSec) {
+      return res.status(401).json({ error: 'Google ID token has expired.' });
+    }
+
+    // Verify email verified status
+    if (payload.email_verified !== 'true' && payload.email_verified !== true) {
+      return res.status(401).json({ error: 'Google account email is not verified.' });
+    }
+
+    const verifiedEmail = payload.email?.toLowerCase().trim();
+    if (!verifiedEmail || !verifiedEmail.includes('@')) {
+      return res.status(400).json({ error: 'Google did not return a valid verified email address.' });
+    }
+
+    const verifiedSub = payload.sub;
+    const verifiedName = payload.name || payload.given_name || verifiedEmail.split('@')[0] || 'Google User';
+    const verifiedPicture = payload.picture || undefined;
+
+    // Securely resolve or register the user with verified claims
     const { user, token } = findOrCreateGoogleUser({
-      googleId: 'google_oauth_demo_119321813297',
-      email: 'aadeshv825@gmail.com',
-      name: 'Aadesh V',
-      avatarUrl: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120&auto=format&fit=crop&q=80',
+      googleId: verifiedSub,
+      email: verifiedEmail,
+      name: verifiedName,
+      avatarUrl: verifiedPicture,
     });
+
     const usage = getDailyUsage(user.id, user.plan === 'pro');
+    console.log(`[GoogleAuth] Cryptographically verified and authenticated Android user: ${user.email}`);
+
     res.json({
+      success: true,
       token,
       user: serializeUser(user),
       usage,
     });
   } catch (err: any) {
-    res.status(500).json({ error: 'Failed to authenticate with demo Google account.' });
+    console.error('Android Google auth error:', err);
+    res.status(500).json({ error: err.message || 'Failed to authenticate with verified Google account.' });
   }
 });
 

@@ -16,7 +16,9 @@ import { ProfileModal } from './components/ProfileModal';
 import { SettingsModal } from './components/SettingsModal';
 import { AdminUsersModal } from './components/AdminUsersModal';
 import { OnboardingModal } from './components/OnboardingModal';
+import { LoginScreen } from './components/LoginScreen';
 import { AboutModal, HelpModal, PrivacyModal, TermsModal } from './components/LegalAndHelpModals';
+import { GlobalSearchModal } from './components/GlobalSearchModal';
 import { ActiveTab, DocumentHistoryItem, PlanTier } from './types';
 import { SAMPLE_DOCUMENTS } from './data/sampleDocuments';
 import { useAuth } from './context/AuthContext';
@@ -25,13 +27,14 @@ import { logger } from './utils/logger';
 import { triggerHaptic } from './utils/android';
 
 export default function App() {
-  const { user, usage, isLimitReached, updatePlan, refreshUsage, getAuthHeaders } = useAuth();
+  const { user, usage, isLoading, isLimitReached, updatePlan, refreshUsage, getAuthHeaders } = useAuth();
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('home');
   const [hasGeminiKey, setHasGeminiKey] = useState<boolean>(false);
   const [sharedText, setSharedText] = useState<string>('');
 
   // Modals state
+  const [isSearchModalOpen, setIsSearchModalOpen] = useState<boolean>(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState<boolean>(false);
   const [isProModalOpen, setIsProModalOpen] = useState<boolean>(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
@@ -87,6 +90,11 @@ export default function App() {
   useEffect(() => {
     const handleAndroidBack = (e?: Event): boolean => {
       // 1. Close modals in order of presence
+      if (isSearchModalOpen) {
+        setIsSearchModalOpen(false);
+        e?.preventDefault();
+        return true;
+      }
       if (isProModalOpen) {
         setIsProModalOpen(false);
         e?.preventDefault();
@@ -451,6 +459,24 @@ export default function App() {
 
   const effectivePlan: PlanTier = user?.plan || 'free';
 
+  // 1. Initial auth check loading state
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-4">
+        <div className="w-12 h-12 rounded-2xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400 mb-4 animate-pulse">
+          <span className="font-bold text-lg">AI</span>
+        </div>
+        <div className="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mb-2" />
+        <p className="text-xs text-slate-400">Loading AI Document Helper...</p>
+      </div>
+    );
+  }
+
+  // 2. Fresh launch when user is not authenticated: Show AI Document Helper's own Login Screen
+  if (!user) {
+    return <LoginScreen />;
+  }
+
   return (
     <div
       className={`min-h-screen ${
@@ -473,6 +499,7 @@ export default function App() {
         onOpenAuth={() => setIsAuthModalOpen(true)}
         onOpenSettings={() => setIsSettingsModalOpen(true)}
         onOpenAdminUsers={() => setIsAdminUsersModalOpen(true)}
+        onOpenSearch={() => setIsSearchModalOpen(true)}
       />
 
       {/* Main Content Area */}
@@ -625,6 +652,16 @@ export default function App() {
         onOpenAdminUsers={() => setIsAdminUsersModalOpen(true)}
         installPrompt={deferredPrompt}
         onInstallPwa={handleInstallPwa}
+      />
+
+      {/* Global Search Modal */}
+      <GlobalSearchModal
+        isOpen={isSearchModalOpen}
+        onClose={() => setIsSearchModalOpen(false)}
+        onSelectTab={setActiveTab}
+        history={history}
+        onSelectHistory={handleSelectHistoryItem}
+        onLoadSample={handleLoadSample}
       />
 
       {/* Onboarding Feature Tour Modal */}

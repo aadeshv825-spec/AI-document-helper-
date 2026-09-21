@@ -82,7 +82,7 @@ export const AboutModal: React.FC<ModalBaseProps> = ({ isOpen, onClose }) => {
 
             <div className="pt-2 border-t border-slate-800 flex items-center justify-between text-[11px] text-slate-400">
               <span>Version 2.4.0 (Production Build)</span>
-              <span>Made with Google AI Studio</span>
+              <span>AI Document Helper</span>
             </div>
           </div>
         </motion.div>

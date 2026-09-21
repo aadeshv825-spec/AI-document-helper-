@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e3a8a"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+    <linearGradient id="doc" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="sparkle" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#60a5fa"/>
+      <stop offset="100%" stop-color="#93c5fd"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <!-- Document Shape -->
+  <path d="M148 100 H304 L376 172 V400 C376 413.255 365.255 424 352 424 H148 C134.745 424 124 413.255 124 400 V124 C124 110.745 134.745 100 148 100 Z" fill="#1e293b" stroke="#334155" stroke-width="8"/>
+  <path d="M304 100 V172 H376 Z" fill="#334155"/>
+  <!-- Document Lines -->
+  <line x1="168" y1="216" x2="332" y2="216" stroke="#475569" stroke-width="12" stroke-linecap="round"/>
+  <line x1="168" y1="264" x2="332" y2="264" stroke="#475569" stroke-width="12" stroke-linecap="round"/>
+  <line x1="168" y1="312" x2="272" y2="312" stroke="#475569" stroke-width="12" stroke-linecap="round"/>
+  <!-- AI Sparkle Orb -->
+  <circle cx="360" cy="360" r="76" fill="url(#doc)" filter="drop-shadow(0 10px 20px rgba(0,0,0,0.5))"/>
+  <!-- Sparkle Star in Orb -->
+  <path d="M360 316 L369 347 L400 351 L376 371 L383 402 L360 385 L337 402 L344 371 L320 351 L351 347 Z" fill="#ffffff"/>
+</svg>

@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { UserProfile, UsageStats, PlanTier, AdminUserItem } from '../types';
 import { logger } from '../utils/logger';
+import { isNativeGoogleSignInAvailable, launchNativeGoogleSignIn } from '../utils/android';
 
 interface AuthContextType {
   user: UserProfile | null;
@@ -11,9 +12,7 @@ interface AuthContextType {
   isAdmin: boolean;
   login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   register: (name: string, email: string, password: string) => Promise<{ success: boolean; error?: string }>;
-  demoLogin: () => Promise<{ success: boolean; error?: string }>;
   signInWithGoogle: () => Promise<{ success: boolean; requiresConfig?: boolean; error?: string }>;
-  demoGoogleLogin: () => Promise<{ success: boolean; error?: string }>;
   getGoogleOAuthStatus: () => Promise<{ configured: boolean; clientId?: string | null }>;
   logout: () => Promise<void>;
   updateProfile: (name: string, preferredLanguage?: string) => Promise<{ success: boolean; error?: string }>;
@@ -160,29 +159,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const demoLogin = async () => {
-    try {
-      const res = await fetch('/api/auth/demo-login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        return { success: false, error: data.error || 'Demo login failed.' };
-      }
-
-      localStorage.setItem(TOKEN_KEY, data.token);
-      setToken(data.token);
-      setUser(data.user);
-      if (data.usage) setUsage(data.usage);
-      logger.info('Demo user signed in');
-      return { success: true };
-    } catch (err: any) {
-      logger.error('Demo login error', err);
-      return { success: false, error: 'Network error. Please try again.' };
-    }
-  };
-
   const getGoogleOAuthStatus = async () => {
     try {
       const res = await fetch('/api/auth/google/status');
@@ -195,90 +171,168 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const demoGoogleLogin = async () => {
-    try {
-      const res = await fetch('/api/auth/google/demo', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        return { success: false, error: data.error || 'Google demo login failed.' };
-      }
-
-      localStorage.setItem(TOKEN_KEY, data.token);
-      setToken(data.token);
-      setUser(data.user);
-      if (data.usage) setUsage(data.usage);
-      logger.info('Google demo user signed in');
-      return { success: true };
-    } catch (err: any) {
-      logger.error('Google demo login error', err);
-      return { success: false, error: 'Network error. Please try again.' };
-    }
-  };
-
   const signInWithGoogle = async (): Promise<{ success: boolean; requiresConfig?: boolean; error?: string }> => {
     try {
-      const status = await getGoogleOAuthStatus();
-      if (!status.configured) {
-        return {
-          success: false,
-          requiresConfig: true,
-          error: 'Google OAuth is not configured yet. Server is waiting for GOOGLE_CLIENT_ID & GOOGLE_CLIENT_SECRET credentials.',
-        };
+      // 1. Android Native Flow: Official Credential Manager Account Picker (No GOOGLE_CLIENT_SECRET required)
+      if (isNativeGoogleSignInAvailable()) {
+        logger.info('Initiating Android Credential Manager Google Sign-In');
+        const launched = launchNativeGoogleSignIn('358349564336-v9fq2to3b94q8482en0pt9f3b58scfgs.apps.googleusercontent.com');
+        if (launched) {
+          return new Promise((resolve) => {
+            const handleSuccess = async (event: any) => {
+              cleanup();
+              const payload = event.detail || event;
+              try {
+                const res = await fetch('/api/auth/google/native', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                  body: JSON.stringify({
+                    idToken: payload.idToken,
+                    email: payload.email,
+                    displayName: payload.displayName,
+                    photoUrl: payload.photoUrl,
+                  }),
+                });
+                const data = await res.json();
+                if (!res.ok || !data.token) {
+                  resolve({ success: false, error: data.error || 'Failed to authenticate Google account with server.' });
+                  return;
+                }
+
+                localStorage.setItem(TOKEN_KEY, data.token);
+                setToken(data.token);
+                if (data.user) setUser(data.user);
+                if (data.usage) setUsage(data.usage);
+                logger.info('Android Credential Manager Google sign in successful', { email: data.user?.email });
+                resolve({ success: true });
+              } catch (networkErr: any) {
+                logger.error('Android Google auth server exchange failed', networkErr);
+                resolve({ success: false, error: 'Network error communicating with server.' });
+              }
+            };
+
+            const handleError = (event: any) => {
+              cleanup();
+              const errorDetail = event.detail || event;
+              if (errorDetail?.code === 'USER_CANCELLED') {
+                resolve({ success: false, error: 'Google account selection was cancelled.' });
+              } else {
+                resolve({ success: false, error: errorDetail?.error || 'Failed to complete Google Sign-In.' });
+              }
+            };
+
+            const cleanup = () => {
+              window.removeEventListener('onNativeGoogleSignInSuccess' as any, handleSuccess);
+              window.removeEventListener('onNativeGoogleSignInError' as any, handleError);
+              delete window.onNativeGoogleSignInSuccess;
+              delete window.onNativeGoogleSignInError;
+            };
+
+            window.addEventListener('onNativeGoogleSignInSuccess' as any, handleSuccess);
+            window.addEventListener('onNativeGoogleSignInError' as any, handleError);
+            window.onNativeGoogleSignInSuccess = (data) => handleSuccess({ detail: data });
+            window.onNativeGoogleSignInError = (data) => handleError({ detail: data });
+          });
+        }
       }
 
-      const res = await fetch('/api/auth/google/url');
-      const data = await res.json();
-      if (!res.ok || !data.url) {
-        return {
-          success: false,
-          requiresConfig: !data.configured,
-          error: data.error || 'Could not initiate Google authentication.',
-        };
-      }
+      // 2. Web Browser Fallback Flow: Google Identity Services (GSI) with configured public Web Client ID
+      const webClientId = '358349564336-v9fq2to3b94q8482en0pt9f3b58scfgs.apps.googleusercontent.com';
 
-      // Open popup
-      const width = 500;
-      const height = 650;
-      const left = window.screenX + (window.outerWidth - width) / 2;
-      const top = window.screenY + (window.outerHeight - height) / 2;
-      const popup = window.open(
-        data.url,
-        'google_oauth_popup',
-        `width=${width},height=${height},left=${left},top=${top},status=no,toolbar=no,menubar=no`
-      );
+      // Load Google Identity Services script dynamically if not yet available
+      await new Promise<void>((resolve, reject) => {
+        if (typeof (window as any).google?.accounts?.id !== 'undefined') {
+          resolve();
+          return;
+        }
+        const existingScript = document.getElementById('google-gsi-client');
+        if (existingScript) {
+          existingScript.addEventListener('load', () => resolve());
+          existingScript.addEventListener('error', () => reject(new Error('Failed to load Google Identity Services library.')));
+          return;
+        }
+        const script = document.createElement('script');
+        script.id = 'google-gsi-client';
+        script.src = 'https://accounts.google.com/gsi/client';
+        script.async = true;
+        script.defer = true;
+        script.onload = () => resolve();
+        script.onerror = () => reject(new Error('Failed to load Google Identity Services library.'));
+        document.head.appendChild(script);
+      });
 
       return new Promise((resolve) => {
-        const handleMessage = (event: MessageEvent) => {
-          if (event.data && event.data.type === 'GOOGLE_AUTH_SUCCESS') {
-            window.removeEventListener('message', handleMessage);
-            const { token: receivedToken, user: receivedUser, usage: receivedUsage } = event.data;
-            if (receivedToken) {
-              localStorage.setItem(TOKEN_KEY, receivedToken);
-              setToken(receivedToken);
+        const googleId = (window as any).google?.accounts?.id;
+        if (!googleId) {
+          resolve({ success: false, error: 'Google Identity Services library is unavailable.' });
+          return;
+        }
+
+        let isResolved = false;
+
+        googleId.initialize({
+          client_id: webClientId,
+          callback: async (response: { credential?: string }) => {
+            if (isResolved) return;
+            isResolved = true;
+
+            if (!response?.credential) {
+              resolve({ success: false, error: 'No Google credential returned.' });
+              return;
             }
-            if (receivedUser) setUser(receivedUser);
-            if (receivedUsage) setUsage(receivedUsage);
-            logger.info('Google OAuth sign in successful', { email: receivedUser?.email });
-            resolve({ success: true });
-          } else if (event.data && event.data.type === 'GOOGLE_AUTH_ERROR') {
-            window.removeEventListener('message', handleMessage);
-            resolve({ success: false, error: event.data.error || 'Google authentication was cancelled.' });
-          }
-        };
 
-        window.addEventListener('message', handleMessage);
+            try {
+              const verifyRes = await fetch('/api/auth/google/native', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                body: JSON.stringify({ idToken: response.credential }),
+              });
+              const verifyData = await verifyRes.json();
+              if (!verifyRes.ok || !verifyData.token) {
+                resolve({ success: false, error: verifyData.error || 'Failed to authenticate Google account with server.' });
+                return;
+              }
 
-        // Check if popup closed by user
-        const checkClosed = setInterval(() => {
-          if (popup?.closed) {
-            clearInterval(checkClosed);
-            window.removeEventListener('message', handleMessage);
-            resolve({ success: false, error: 'Sign-in window closed.' });
+              localStorage.setItem(TOKEN_KEY, verifyData.token);
+              setToken(verifyData.token);
+              if (verifyData.user) setUser(verifyData.user);
+              if (verifyData.usage) setUsage(verifyData.usage);
+              logger.info('Web Google Identity Services sign in successful', { email: verifyData.user?.email });
+              resolve({ success: true });
+            } catch (networkErr: any) {
+              logger.error('Google token verification server exchange failed', networkErr);
+              resolve({ success: false, error: 'Network error communicating with server.' });
+            }
+          },
+          auto_select: false,
+          cancel_on_tap_outside: true,
+        });
+
+        // Prompt user account selector
+        googleId.prompt((notification: any) => {
+          if (notification.isNotDisplayed()) {
+            logger.warn('Google One Tap not displayed:', notification.getNotDisplayedReason());
+            if (!isResolved) {
+              isResolved = true;
+              resolve({
+                success: false,
+                error: `Google prompt could not be displayed (${notification.getNotDisplayedReason()}). If third-party cookies or popups are blocked, please enable them or test on Android.`,
+              });
+            }
+          } else if (notification.isSkippedMoment()) {
+            logger.warn('Google One Tap skipped:', notification.getSkippedReason());
+            if (!isResolved) {
+              isResolved = true;
+              resolve({ success: false, error: 'Google Sign-In was dismissed.' });
+            }
+          } else if (notification.isDismissedMoment()) {
+            logger.warn('Google One Tap dismissed:', notification.getDismissedReason());
+            if (!isResolved && notification.getDismissedReason() !== 'credential_returned') {
+              isResolved = true;
+              resolve({ success: false, error: 'Google account selection was cancelled.' });
+            }
           }
-        }, 1000);
+        });
       });
     } catch (err: any) {
       logger.error('Google sign in error', err);
@@ -474,9 +528,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isAdmin,
         login,
         register,
-        demoLogin,
         signInWithGoogle,
-        demoGoogleLogin,
         getGoogleOAuthStatus,
         logout,
         updateProfile,

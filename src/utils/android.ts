@@ -12,8 +12,42 @@ declare global {
       shareText?: (title: string, text: string) => void;
       copyToClipboard?: (text: string) => void;
     };
+    AndroidGoogleSignIn?: {
+      isGoogleSignInSupported?: () => boolean;
+      launchGoogleSignIn?: (webClientId?: string) => void;
+    };
     onAndroidBackPressed?: () => boolean;
+    onNativeGoogleSignInSuccess?: (data: {
+      idToken: string;
+      email: string;
+      displayName: string;
+      photoUrl: string;
+    }) => void;
+    onNativeGoogleSignInError?: (data: {
+      error: string;
+      code: string;
+    }) => void;
   }
+}
+
+/**
+ * Checks whether native Android Google Sign-In / Credential Manager bridge is available
+ */
+export function isNativeGoogleSignInAvailable(): boolean {
+  if (typeof window === 'undefined') return false;
+  return !!window.AndroidGoogleSignIn?.isGoogleSignInSupported?.();
+}
+
+/**
+ * Triggers native Android Credential Manager account selection
+ */
+export function launchNativeGoogleSignIn(clientId?: string): boolean {
+  if (typeof window === 'undefined') return false;
+  if (window.AndroidGoogleSignIn?.launchGoogleSignIn) {
+    window.AndroidGoogleSignIn.launchGoogleSignIn(clientId);
+    return true;
+  }
+  return false;
 }
 
 /**
