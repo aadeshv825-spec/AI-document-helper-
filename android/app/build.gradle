@@ -5,13 +5,13 @@ plugins {
 
 android {
     namespace 'com.aidocumenthelper.app'
-    compileSdk 34
+    compileSdk 36
 
     defaultConfig {
         applicationId "com.aidocumenthelper.app"
         minSdk 24
-        targetSdk 34
-        versionCode 1
+        targetSdk 36
+        versionCode 2
         versionName "1.0.0"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
@@ -23,9 +23,9 @@ android {
     signingConfigs {
         release {
             storeFile file("release.keystore")
-            storePassword "AIDocHelper2026!"
+            storePassword "YOUR_KEYSTORE_PASSWORD"
             keyAlias "aidocumenthelper"
-            keyPassword "AIDocHelper2026!"
+            keyPassword "YOUR_KEY_PASSWORD"
         }
     }
 
@@ -36,6 +36,7 @@ android {
             shrinkResources false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
+
         debug {
             applicationIdSuffix ".debug"
             debuggable true
@@ -64,16 +65,16 @@ dependencies {
     implementation 'androidx.activity:activity-ktx:1.9.1'
     implementation 'androidx.webkit:webkit:1.11.0'
     implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
-    
-    // Official Google Play Billing Client 7.x
-    implementation 'com.android.billingclient:billing-ktx:7.0.0'
-    
-    // Android Credential Manager & Google Play Identity (Google Sign-In Account Picker)
+
+    // Google Play Billing 8.x
+    implementation 'com.android.billingclient:billing-ktx:8.0.0'
+
+    // Android Credential Manager & Google Sign-In
     implementation 'androidx.credentials:credentials:1.3.0'
     implementation 'androidx.credentials:credentials-play-services-auth:1.3.0'
     implementation 'com.google.android.libraries.identity.googleid:googleid:1.1.1'
     implementation 'com.google.android.gms:play-services-auth:21.2.0'
-    
+
     // Coroutines
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1'
