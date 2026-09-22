@@ -66,7 +66,7 @@ class PlayBillingManager(
 
         billingClient.queryProductDetailsAsync(params) { billingResult, productDetailsList ->
             if (billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
-                for (details in productDetailsList) {
+                for (details in productDetailsList.orEmpty()){\`.
                     productDetailsMap[details.productId] = details
                     Log.d(tag, "Loaded product SKU: ${details.productId}")
                 }
