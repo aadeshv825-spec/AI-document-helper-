@@ -1,0 +1,44 @@
+name: Generate New Upload Key
+
+on:
+  workflow_dispatch:
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Generate upload keystore and certificate
+        env:
+          NEW_UPLOAD_KEY_PASSWORD: ${{ secrets.NEW_UPLOAD_KEY_PASSWORD }}
+        run: |
+          keytool -genkeypair \
+            -v \
+            -keystore upload-keystore.jks \
+            -storepass "$NEW_UPLOAD_KEY_PASSWORD" \
+            -keypass "$NEW_UPLOAD_KEY_PASSWORD" \
+            -alias upload \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=AI Document Helper, O=Aadesh Apps, C=IN"
+
+          keytool -export -rfc \
+            -keystore upload-keystore.jks \
+            -storepass "$NEW_UPLOAD_KEY_PASSWORD" \
+            -alias upload \
+            -file upload_certificate.pem
+
+      - name: Upload new upload key files
+        uses: actions/upload-artifact@v4
+        with:
+          name: new-upload-key
+          path: |
+            upload-keystore.jks
+            upload_certificate.pem
