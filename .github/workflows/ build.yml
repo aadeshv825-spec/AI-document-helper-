@@ -25,6 +25,17 @@ jobs:
           printf '%s' "$NEW_UPLOAD_KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
           chmod 600 android/app/upload-keystore.jks
 
+      - name: Verify upload keystore
+        env:
+          NEW_UPLOAD_KEY_PASSWORD: ${{ secrets.NEW_UPLOAD_KEY_PASSWORD }}
+        run: |
+          keytool -list \
+            -v \
+            -keystore android/app/upload-keystore.jks \
+            -storetype PKCS12 \
+            -storepass "$NEW_UPLOAD_KEY_PASSWORD" \
+            -alias upload
+
       - name: Build Release AAB
         env:
           NEW_UPLOAD_KEY_PASSWORD: ${{ secrets.NEW_UPLOAD_KEY_PASSWORD }}
