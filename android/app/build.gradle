@@ -25,6 +25,7 @@ android {
         release {
             storeFile file("upload-keystore.jks")
             storePassword System.getenv("NEW_UPLOAD_KEY_PASSWORD")
+            storeType "PKCS12"
             keyAlias "upload"
             keyPassword System.getenv("NEW_UPLOAD_KEY_PASSWORD")
         }
