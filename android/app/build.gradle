@@ -23,10 +23,10 @@ android {
 
     signingConfigs {
         release {
-            storeFile file("release.keystore")
-            storePassword System.getenv("KEYSTORE_PASSWORD")
-            keyAlias "aidocumenthelper"
-            keyPassword System.getenv("KEY_PASSWORD")
+            storeFile file("upload-keystore.jks")
+            storePassword System.getenv("NEW_UPLOAD_KEY_PASSWORD")
+            keyAlias "upload"
+            keyPassword System.getenv("NEW_UPLOAD_KEY_PASSWORD")
         }
     }
 
