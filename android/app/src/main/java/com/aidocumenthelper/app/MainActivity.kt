@@ -37,6 +37,7 @@ class MainActivity : AppCompatActivity() {
     private val tag = "MainActivity"
 
     private lateinit var webView: WebView
+    private lateinit var googleSignInBridge: GoogleSignInManager
 
     private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
     private var currentCameraPhotoUri: Uri? = null
@@ -189,7 +190,7 @@ class MainActivity : AppCompatActivity() {
         val playBillingBridge =
             PlayBillingManager(this, webView)
 
-        val googleSignInBridge =
+        googleSignInBridge =
             GoogleSignInManager(this, webView)
 
         webView.addJavascriptInterface(
@@ -488,6 +489,28 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         )
+    }
+
+    override fun onActivityResult(
+        requestCode: Int,
+        resultCode: Int,
+        data: Intent?
+    ) {
+        super.onActivityResult(
+            requestCode,
+            resultCode,
+            data
+        )
+
+        if (
+            requestCode ==
+            GoogleSignInManager.GOOGLE_SIGN_IN_REQUEST_CODE
+        ) {
+            googleSignInBridge.handleGoogleSignInResult(
+                resultCode,
+                data
+            )
+        }
     }
 
     override fun onDestroy() {
