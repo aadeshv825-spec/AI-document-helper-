@@ -42,7 +42,35 @@ const PORT = 3000;
 
 app.use(express.json({ limit: '30mb' }));
 app.use(express.urlencoded({ extended: true, limit: '30mb' }));
+// CORS support for Android WebView / appassets origin
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
 
+  if (
+    origin === 'https://appassets.androidplatform.net' ||
+    origin === 'http://localhost:3000' ||
+    origin === 'http://localhost:5173'
+  ) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+
+  res.setHeader('Vary', 'Origin');
+  res.setHeader(
+    'Access-Control-Allow-Methods',
+    'GET, POST, PUT, DELETE, OPTIONS'
+  );
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type, Authorization, x-client-id'
+  );
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+
+  next();
+});
 // Global API rate limiting middleware for abuse prevention
 app.use('/api/', (req, res, next) => {
   const ip = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
