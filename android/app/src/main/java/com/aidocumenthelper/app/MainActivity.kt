@@ -12,17 +12,25 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
 import android.view.View
-import android.webkit.*
+import android.webkit.ConsoleMessage
+import android.webkit.PermissionRequest
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.webkit.WebViewAssetLoader
-import androidx.webkit.WebViewClientCompat
 import java.io.File
 import java.text.SimpleDateFormat
-import java.util.*
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
@@ -83,7 +91,6 @@ class MainActivity : AppCompatActivity() {
                 fileChooserCallback?.onReceiveValue(results)
 
             } else {
-
                 fileChooserCallback?.onReceiveValue(null)
             }
 
@@ -141,7 +148,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (permissionsToRequest.isNotEmpty()) {
-
             requestPermissionLauncher.launch(
                 permissionsToRequest.toTypedArray()
             )
@@ -170,7 +176,6 @@ class MainActivity : AppCompatActivity() {
 
         settings.useWideViewPort = true
         settings.loadWithOverviewMode = true
-
         settings.cacheMode = WebSettings.LOAD_DEFAULT
 
         val customUserAgent =
@@ -178,15 +183,12 @@ class MainActivity : AppCompatActivity() {
 
         settings.userAgentString = customUserAgent
 
-        // Native Android bridge
         val nativeBridge =
             NativeBridgeInterface(this)
 
-        // Google Play Billing bridge
         val playBillingBridge =
             PlayBillingManager(this, webView)
 
-        // Google Sign-In bridge
         val googleSignInBridge =
             GoogleSignInManager(this, webView)
 
@@ -247,7 +249,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-        // Secure local asset loader
         val assetLoader =
             WebViewAssetLoader.Builder()
                 .addPathHandler(
@@ -257,12 +258,16 @@ class MainActivity : AppCompatActivity() {
                 .build()
 
         webView.webViewClient =
-            object : WebViewClientCompat() {
+            object : WebViewClient() {
 
                 override fun shouldInterceptRequest(
-                    view: WebView,
-                    request: WebResourceRequest
+                    view: WebView?,
+                    request: WebResourceRequest?
                 ): WebResourceResponse? {
+
+                    if (request == null) {
+                        return null
+                    }
 
                     return assetLoader.shouldInterceptRequest(
                         request.url
@@ -270,9 +275,13 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 override fun shouldInterceptRequest(
-                    view: WebView,
-                    url: String
+                    view: WebView?,
+                    url: String?
                 ): WebResourceResponse? {
+
+                    if (url == null) {
+                        return null
+                    }
 
                     return assetLoader.shouldInterceptRequest(
                         Uri.parse(url)
@@ -284,8 +293,11 @@ class MainActivity : AppCompatActivity() {
                     request: WebResourceRequest?
                 ): Boolean {
 
-                    val url =
-                        request?.url ?: return false
+                    if (request == null) {
+                        return false
+                    }
+
+                    val url = request.url
 
                     if (
                         url.scheme == "mailto" ||
@@ -315,27 +327,6 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     return false
-                }
-
-                override fun onReceivedError(
-                    view: WebView?,
-                    request: WebResourceRequest?,
-                    error: WebResourceError?
-                ) {
-
-                    val failingUrl =
-                        request?.url?.toString() ?: ""
-
-                    Log.e(
-                        tag,
-                        "WebView error: $failingUrl - ${error?.description}"
-                    )
-
-                    super.onReceivedError(
-                        view,
-                        request,
-                        error
-                    )
                 }
             }
     }
