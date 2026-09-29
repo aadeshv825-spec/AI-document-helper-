@@ -1,6 +1,6 @@
 package com.aidocumenthelper.app
 
-import android.content.Context
+import android.content.Intent
 import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
@@ -23,17 +23,14 @@ import org.json.JSONObject
 import java.security.MessageDigest
 import java.util.UUID
 
-/**
- * Manages Google Sign-In via Android Credential Manager and Play Services Identity.
- * Provides the official Android system account picker bottom-sheet when the user taps
- * "Continue with Google", without ever auto-starting unrequested authentication.
- */
 class GoogleSignInManager(
     private val activity: AppCompatActivity,
     private val webView: WebView
 ) {
     private val tag = "GoogleSignInManager"
-    private val credentialManager: CredentialManager = CredentialManager.create(activity)
+    private val credentialManager: CredentialManager =
+        CredentialManager.create(activity)
+
     private val scope = CoroutineScope(Dispatchers.Main)
 
     @JavascriptInterface
@@ -41,194 +38,322 @@ class GoogleSignInManager(
         return true
     }
 
-    /**
-     * Triggered explicitly when the user taps the "Continue with Google" button.
-     * Launches the official Android Google Account Picker / Credential Manager bottom sheet.
-     */
     @JavascriptInterface
     fun launchGoogleSignIn(webClientId: String?) {
         activity.runOnUiThread {
             scope.launch {
                 try {
-                    val clientId = if (!webClientId.isNullOrBlank()) {
-                        webClientId
-                    } else {
-                        try {
+                    val clientId =
+                        if (!webClientId.isNullOrBlank()) {
+                            webClientId
+                        } else {
                             activity.getString(R.string.default_web_client_id)
-                        } catch (_: Exception) {
-                            "ai-document-helper-client"
                         }
-                    }
 
-                    Log.d(tag, "Launching Android Credential Manager with Client ID: $clientId")
-
-                    // Build raw nonce & hashed nonce for GoogleIdTokenCredential
                     val rawNonce = UUID.randomUUID().toString()
-                    val bytes = rawNonce.toByteArray()
-                    val md = MessageDigest.getInstance("SHA-256")
-                    val digest = md.digest(bytes)
-                    val hashedNonce = digest.fold("") { str, it -> str + "%02x".format(it) }
+                    val digest = MessageDigest.getInstance("SHA-256")
+                        .digest(rawNonce.toByteArray())
 
-                    val googleIdOption = GetGoogleIdOption.Builder()
-                        .setFilterByAuthorizedAccounts(false)
-                        .setServerClientId(clientId)
-                        .setAutoSelectEnabled(false) // Ensures explicit user account selection
-                        .setNonce(hashedNonce)
-                        .build()
-
-                    val request = GetCredentialRequest.Builder()
-                        .addCredentialOption(googleIdOption)
-                        .build()
-
-                    val response: GetCredentialResponse = withContext(Dispatchers.IO) {
-                        credentialManager.getCredential(activity, request)
+                    val hashedNonce = digest.joinToString("") {
+                        "%02x".format(it)
                     }
+
+                    val googleIdOption =
+                        GetGoogleIdOption.Builder()
+                            .setFilterByAuthorizedAccounts(false)
+                            .setServerClientId(clientId)
+                            .setAutoSelectEnabled(false)
+                            .setNonce(hashedNonce)
+                            .build()
+
+                    val request =
+                        GetCredentialRequest.Builder()
+                            .addCredentialOption(googleIdOption)
+                            .build()
+
+                    val response: GetCredentialResponse =
+                        withContext(Dispatchers.IO) {
+                            credentialManager.getCredential(
+                                activity,
+                                request
+                            )
+                        }
 
                     handleCredentialResponse(response)
 
                 } catch (e: GetCredentialCancellationException) {
-                    Log.i(tag, "Google sign-in cancelled by user")
-                    sendErrorToWeb("User cancelled Google account selection", "USER_CANCELLED")
+                    Log.i(tag, "Google sign-in cancelled")
+                    sendErrorToWeb(
+                        "User cancelled Google account selection",
+                        "USER_CANCELLED"
+                    )
+
                 } catch (e: GetCredentialException) {
-                    Log.w(tag, "Credential Manager error, falling back to Google Play Account picker: ${e.message}")
+                    Log.w(
+                        tag,
+                        "Credential Manager failed, using fallback",
+                        e
+                    )
                     fallbackToGoogleAccountPicker()
+
                 } catch (e: Exception) {
-                    Log.w(tag, "Sign in exception: ${e.message}, attempting fallback")
+                    Log.w(
+                        tag,
+                        "Google sign-in failed, using fallback",
+                        e
+                    )
                     fallbackToGoogleAccountPicker()
                 }
             }
         }
     }
 
-    private fun handleCredentialResponse(response: GetCredentialResponse) {
+    private fun handleCredentialResponse(
+        response: GetCredentialResponse
+    ) {
         val credential = response.credential
-        when (credential) {
-            is CustomCredential -> {
-                if (credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                    try {
-                        val googleIdToken = GoogleIdTokenCredential.createFrom(credential.data)
-                        val idToken = googleIdToken.idToken
-                        val email = googleIdToken.id
-                        val displayName = googleIdToken.displayName ?: email.substringBefore("@")
-                        val photoUrl = googleIdToken.profilePictureUri?.toString() ?: ""
 
-                        Log.i(tag, "Successfully selected Google account: $email")
+        if (
+            credential is CustomCredential &&
+            credential.type ==
+            GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
+        ) {
+            try {
+                val googleIdToken =
+                    GoogleIdTokenCredential.createFrom(
+                        credential.data
+                    )
 
-                        sendSuccessToWeb(
-                            idToken = idToken,
-                            email = email,
-                            displayName = displayName,
-                            photoUrl = photoUrl
-                        )
-                    } catch (e: Exception) {
-                        Log.e(tag, "Error parsing GoogleIdTokenCredential", e)
-                        fallbackToGoogleAccountPicker()
-                    }
-                } else {
-                    fallbackToGoogleAccountPicker()
-                }
-            }
-            else -> {
+                sendSuccessToWeb(
+                    idToken = googleIdToken.idToken,
+                    email = googleIdToken.id,
+                    displayName =
+                        googleIdToken.displayName
+                            ?: googleIdToken.id.substringBefore("@"),
+                    photoUrl =
+                        googleIdToken.profilePictureUri
+                            ?.toString()
+                            ?: ""
+                )
+
+            } catch (e: Exception) {
+                Log.e(
+                    tag,
+                    "Failed to parse Google credential",
+                    e
+                )
                 fallbackToGoogleAccountPicker()
             }
+        } else {
+            fallbackToGoogleAccountPicker()
         }
     }
 
-    /**
-     * Fallback for devices without Play Services Identity Credential Provider,
-     * using the standard Google Play Services account picker or device accounts.
-     */
     private fun fallbackToGoogleAccountPicker() {
         try {
-            val serverClientId = try {
-                activity.getString(R.string.default_web_client_id)
-            } catch (_: Exception) {
-                ""
-            }
+            val serverClientId =
+                activity.getString(
+                    R.string.default_web_client_id
+                )
 
-            val account = GoogleSignIn.getLastSignedInAccount(activity)
-            if (account != null && !account.email.isNullOrBlank() && !account.idToken.isNullOrBlank()) {
+            val account =
+                GoogleSignIn.getLastSignedInAccount(activity)
+
+            if (
+                account != null &&
+                !account.email.isNullOrBlank() &&
+                !account.idToken.isNullOrBlank()
+            ) {
                 sendSuccessToWeb(
                     idToken = account.idToken!!,
-                    email = account.email ?: "user@gmail.com",
-                    displayName = account.displayName ?: account.givenName ?: "Google User",
-                    photoUrl = account.photoUrl?.toString() ?: ""
+                    email = account.email!!,
+                    displayName =
+                        account.displayName
+                            ?: account.givenName
+                            ?: "Google User",
+                    photoUrl =
+                        account.photoUrl?.toString() ?: ""
                 )
                 return
             }
 
-            // Create a Google Sign-In client to prompt account selection with ID Token
-            val builder = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
-                .requestEmail()
-                .requestProfile()
+            val options =
+                GoogleSignInOptions.Builder(
+                    GoogleSignInOptions.DEFAULT_SIGN_IN
+                )
+                    .requestEmail()
+                    .requestProfile()
+                    .requestIdToken(serverClientId)
+                    .build()
 
-            if (serverClientId.isNotBlank()) {
-                builder.requestIdToken(serverClientId)
-            }
+            val client =
+                GoogleSignIn.getClient(
+                    activity,
+                    options
+                )
 
-            val googleSignInClient = GoogleSignIn.getClient(activity, builder.build())
-            val intent = googleSignInClient.signInIntent
-            activity.startActivity(intent)
+            activity.startActivityForResult(
+                client.signInIntent,
+                GOOGLE_SIGN_IN_REQUEST_CODE
+            )
 
         } catch (e: Exception) {
-            Log.e(tag, "Fallback Google account picker failed", e)
-            sendErrorToWeb("Could not complete Google Sign-In: ${e.message}", "UNAVAILABLE")
+            Log.e(
+                tag,
+                "Fallback Google picker failed",
+                e
+            )
+
+            sendErrorToWeb(
+                "Could not start Google Sign-In",
+                "UNAVAILABLE"
+            )
         }
     }
 
-    private fun sendSuccessToWeb(idToken: String, email: String, displayName: String, photoUrl: String) {
-        val jsonPayload = JSONObject().apply {
-            put("type", "NATIVE_GOOGLE_AUTH_SUCCESS")
-            put("idToken", idToken)
-            put("email", email)
-            put("displayName", displayName)
-            put("photoUrl", photoUrl)
-        }.toString()
+    fun handleGoogleSignInResult(
+        resultCode: Int,
+        data: Intent?
+    ) {
+        if (resultCode != AppCompatActivity.RESULT_OK) {
+            sendErrorToWeb(
+                "Google Sign-In was cancelled",
+                "USER_CANCELLED"
+            )
+            return
+        }
 
-        val escapedPayload = JSONObject.quote(jsonPayload)
-        val jsScript = """
+        try {
+            val account =
+                GoogleSignIn.getSignedInAccountFromIntent(data)
+                    .getResult(
+                        com.google.android.gms.common.api.ApiException::class.java
+                    )
+
+            val idToken = account.idToken
+            val email = account.email
+
+            if (
+                idToken.isNullOrBlank() ||
+                email.isNullOrBlank()
+            ) {
+                sendErrorToWeb(
+                    "Google did not return a valid account",
+                    "INVALID_ACCOUNT"
+                )
+                return
+            }
+
+            sendSuccessToWeb(
+                idToken = idToken,
+                email = email,
+                displayName =
+                    account.displayName
+                        ?: account.givenName
+                        ?: "Google User",
+                photoUrl =
+                    account.photoUrl?.toString() ?: ""
+            )
+
+        } catch (e: Exception) {
+            Log.e(
+                tag,
+                "Google Sign-In result failed",
+                e
+            )
+
+            sendErrorToWeb(
+                "Could not complete Google Sign-In",
+                "SIGN_IN_FAILED"
+            )
+        }
+    }
+
+    private fun sendSuccessToWeb(
+        idToken: String,
+        email: String,
+        displayName: String,
+        photoUrl: String
+    ) {
+        val payload =
+            JSONObject().apply {
+                put("type", "NATIVE_GOOGLE_AUTH_SUCCESS")
+                put("idToken", idToken)
+                put("email", email)
+                put("displayName", displayName)
+                put("photoUrl", photoUrl)
+            }.toString()
+
+        val escaped =
+            JSONObject.quote(payload)
+
+        val js =
+            """
             (function() {
                 try {
-                    var data = JSON.parse($escapedPayload);
-                    window.dispatchEvent(new CustomEvent('onNativeGoogleSignInSuccess', { detail: data }));
+                    var data = JSON.parse($escaped);
+                    window.dispatchEvent(
+                        new CustomEvent(
+                            'onNativeGoogleSignInSuccess',
+                            { detail: data }
+                        )
+                    );
+
                     if (window.onNativeGoogleSignInSuccess) {
                         window.onNativeGoogleSignInSuccess(data);
                     }
-                } catch(err) {
-                    console.error('Failed to dispatch native Google Sign-In success', err);
+                } catch (err) {
+                    console.error(err);
                 }
             })();
-        """.trimIndent()
+            """.trimIndent()
 
         activity.runOnUiThread {
-            webView.evaluateJavascript(jsScript, null)
+            webView.evaluateJavascript(js, null)
         }
     }
 
-    private fun sendErrorToWeb(errorMessage: String, errorCode: String) {
-        val jsonPayload = JSONObject().apply {
-            put("type", "NATIVE_GOOGLE_AUTH_ERROR")
-            put("error", errorMessage)
-            put("code", errorCode)
-        }.toString()
+    private fun sendErrorToWeb(
+        errorMessage: String,
+        errorCode: String
+    ) {
+        val payload =
+            JSONObject().apply {
+                put("type", "NATIVE_GOOGLE_AUTH_ERROR")
+                put("error", errorMessage)
+                put("code", errorCode)
+            }.toString()
 
-        val escapedPayload = JSONObject.quote(jsonPayload)
-        val jsScript = """
+        val escaped =
+            JSONObject.quote(payload)
+
+        val js =
+            """
             (function() {
                 try {
-                    var data = JSON.parse($escapedPayload);
-                    window.dispatchEvent(new CustomEvent('onNativeGoogleSignInError', { detail: data }));
+                    var data = JSON.parse($escaped);
+                    window.dispatchEvent(
+                        new CustomEvent(
+                            'onNativeGoogleSignInError',
+                            { detail: data }
+                        )
+                    );
+
                     if (window.onNativeGoogleSignInError) {
                         window.onNativeGoogleSignInError(data);
                     }
-                } catch(err) {
-                    console.error('Failed to dispatch native Google Sign-In error', err);
+                } catch (err) {
+                    console.error(err);
                 }
             })();
-        """.trimIndent()
+            """.trimIndent()
 
         activity.runOnUiThread {
-            webView.evaluateJavascript(jsScript, null)
+            webView.evaluateJavascript(js, null)
         }
+    }
+
+    companion object {
+        const val GOOGLE_SIGN_IN_REQUEST_CODE = 9001
     }
 }
