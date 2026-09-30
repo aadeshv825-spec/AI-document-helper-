@@ -5,11 +5,10 @@ import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import com.android.billingclient.api.*
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class PlayBillingManager(
     private val activity: Activity,
@@ -18,75 +17,110 @@ class PlayBillingManager(
 
     private val tag = "PlayBillingManager"
 
-    private var billingClient: BillingClient = BillingClient.newBuilder(activity)
-        .setListener(this)
-        .enablePendingPurchases(
-            PendingPurchasesParams.newBuilder()
-                .enableOneTimeProducts()
-                .build()
-        )
-        .build()
+    private var billingClient: BillingClient =
+        BillingClient.newBuilder(activity)
+            .setListener(this)
+            .enablePendingPurchases(
+                PendingPurchasesParams.newBuilder()
+                    .enableOneTimeProducts()
+                    .build()
+            )
+            .build()
 
     private var isConnected = false
 
-    private val productDetailsMap = mutableMapOf<String, ProductDetails>()
+    private val productDetailsMap =
+        mutableMapOf<String, ProductDetails>()
 
     init {
         startConnection()
     }
 
     private fun startConnection() {
-        billingClient.startConnection(object : BillingClientStateListener {
+        billingClient.startConnection(
+            object : BillingClientStateListener {
 
-            override fun onBillingSetupFinished(billingResult: BillingResult) {
-                if (billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
-                    isConnected = true
-                    Log.d(tag, "BillingClient connected successfully")
-                    querySubscriptionProducts()
-                } else {
-                    Log.e(
+                override fun onBillingSetupFinished(
+                    billingResult: BillingResult
+                ) {
+                    if (
+                        billingResult.responseCode ==
+                        BillingClient.BillingResponseCode.OK
+                    ) {
+                        isConnected = true
+
+                        Log.d(
+                            tag,
+                            "BillingClient connected successfully"
+                        )
+
+                        querySubscriptionProducts()
+                    } else {
+                        isConnected = false
+
+                        Log.e(
+                            tag,
+                            "BillingClient setup failed: ${billingResult.debugMessage}"
+                        )
+                    }
+                }
+
+                override fun onBillingServiceDisconnected() {
+                    isConnected = false
+
+                    Log.w(
                         tag,
-                        "BillingClient setup failed: ${billingResult.debugMessage}"
+                        "BillingClient disconnected, will retry on next action"
                     )
                 }
             }
-
-            override fun onBillingServiceDisconnected() {
-                isConnected = false
-                Log.w(
-                    tag,
-                    "BillingClient disconnected, will retry on next action"
-                )
-            }
-        })
+        )
     }
 
     private fun querySubscriptionProducts() {
 
         val productList = listOf(
 
-            QueryProductDetailsParams.Product.newBuilder()
+            QueryProductDetailsParams.Product
+                .newBuilder()
                 .setProductId("ai_doc_pro_monthly")
-                .setProductType(BillingClient.ProductType.SUBS)
+                .setProductType(
+                    BillingClient.ProductType.SUBS
+                )
                 .build(),
 
-            QueryProductDetailsParams.Product.newBuilder()
+            QueryProductDetailsParams.Product
+                .newBuilder()
                 .setProductId("ai_doc_pro_annual")
-                .setProductType(BillingClient.ProductType.SUBS)
+                .setProductType(
+                    BillingClient.ProductType.SUBS
+                )
                 .build()
         )
 
-        val params = QueryProductDetailsParams.newBuilder()
-            .setProductList(productList)
-            .build()
+        val params =
+            QueryProductDetailsParams
+                .newBuilder()
+                .setProductList(productList)
+                .build()
 
-        billingClient.queryProductDetailsAsync(params) { billingResult, queryProductDetailsResult ->
+        billingClient.queryProductDetailsAsync(
+            params
+        ) { billingResult, queryProductDetailsResult ->
 
-            if (billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
+            if (
+                billingResult.responseCode ==
+                BillingClient.BillingResponseCode.OK
+            ) {
 
-                for (details in queryProductDetailsResult.productDetailsList) {
+                for (
+                    details in
+                    queryProductDetailsResult.productDetailsList
+                ) {
 
-                    productDetailsMap[details.productId] = details
+                    productDetailsMap[
+                        details.productId
+                    ] = details
 
                     Log.d(
                         tag,
@@ -128,7 +162,8 @@ class PlayBillingManager(
                 return@runOnUiThread
             }
 
-            val productDetails = productDetailsMap[sku]
+            val productDetails =
+                productDetailsMap[sku]
 
             if (productDetails == null) {
 
@@ -140,7 +175,8 @@ class PlayBillingManager(
             }
 
             val offerToken =
-                productDetails.subscriptionOfferDetails
+                productDetails
+                    .subscriptionOfferDetails
                     ?.firstOrNull()
                     ?.offerToken
 
@@ -154,23 +190,30 @@ class PlayBillingManager(
             }
 
             val productDetailsParams =
-                BillingFlowParams.ProductDetailsParams
+                BillingFlowParams
+                    .ProductDetailsParams
                     .newBuilder()
-                    .setProductDetails(productDetails)
-                    .setOfferToken(offerToken)
+                    .setProductDetails(
+                        productDetails
+                    )
+                    .setOfferToken(
+                        offerToken
+                    )
                     .build()
 
             val flowParamsBuilder =
-                BillingFlowParams.newBuilder()
+                BillingFlowParams
+                    .newBuilder()
                     .setProductDetailsParamsList(
                         listOf(productDetailsParams)
                     )
 
             if (!accountId.isNullOrBlank()) {
 
-                flowParamsBuilder.setObfuscatedAccountId(
-                    accountId
-                )
+                flowParamsBuilder
+                    .setObfuscatedAccountId(
+                        accountId
+                    )
             }
 
             val billingResult =
@@ -191,67 +234,154 @@ class PlayBillingManager(
         }
     }
 
+    /**
+     * Queries active Google Play subscriptions.
+     *
+     * IMPORTANT:
+     * queryPurchasesAsync() is asynchronous.
+     * The previous implementation returned the JSON
+     * before the callback completed, causing restore
+     * purchases to receive an empty list.
+     *
+     * A CountDownLatch is used here so the JavaScript
+     * bridge waits for the actual BillingClient result.
+     */
     @JavascriptInterface
     fun queryPurchases(): String {
 
-        val resultJson = JSONArray()
-
         if (!isConnected) {
-            return resultJson.toString()
+            Log.w(
+                tag,
+                "queryPurchases called while BillingClient is disconnected"
+            )
+
+            return JSONArray().toString()
         }
 
+        val resultJson = JSONArray()
+
+        val latch = CountDownLatch(1)
+
         val params =
-            QueryPurchasesParams.newBuilder()
-                .setProductType(BillingClient.ProductType.SUBS)
+            QueryPurchasesParams
+                .newBuilder()
+                .setProductType(
+                    BillingClient.ProductType.SUBS
+                )
                 .build()
 
-        billingClient.queryPurchasesAsync(params) {
-                billingResult,
-                purchases ->
+        billingClient.queryPurchasesAsync(
+            params
+        ) { billingResult, purchases ->
 
-            if (
-                billingResult.responseCode ==
-                BillingClient.BillingResponseCode.OK
-            ) {
+            try {
 
-                for (p in purchases) {
+                if (
+                    billingResult.responseCode ==
+                    BillingClient.BillingResponseCode.OK
+                ) {
 
-                    val item = JSONObject()
+                    for (purchase in purchases) {
 
-                    item.put(
-                        "orderId",
-                        p.orderId
-                    )
+                        val item =
+                            JSONObject()
 
-                    item.put(
-                        "purchaseToken",
-                        p.purchaseToken
-                    )
+                        item.put(
+                            "orderId",
+                            purchase.orderId ?: ""
+                        )
 
-                    item.put(
-                        "purchaseTime",
-                        p.purchaseTime
-                    )
+                        item.put(
+                            "purchaseToken",
+                            purchase.purchaseToken
+                        )
 
-                    item.put(
-                        "purchaseState",
-                        p.purchaseState
-                    )
+                        item.put(
+                            "purchaseTime",
+                            purchase.purchaseTime
+                        )
 
-                    val productsArray = JSONArray()
+                        item.put(
+                            "purchaseState",
+                            purchase.purchaseState
+                        )
 
-                    p.products.forEach {
-                        productsArray.put(it)
+                        item.put(
+                            "isAcknowledged",
+                            purchase.isAcknowledged
+                        )
+
+                        val productsArray =
+                            JSONArray()
+
+                        purchase.products.forEach { product ->
+                            productsArray.put(product)
+                        }
+
+                        item.put(
+                            "products",
+                            productsArray
+                        )
+
+                        resultJson.put(item)
                     }
 
-                    item.put(
-                        "products",
-                        productsArray
+                    Log.d(
+                        tag,
+                        "Found ${purchases.size} Google Play subscription purchase(s)"
                     )
 
-                    resultJson.put(item)
+                } else {
+
+                    Log.e(
+                        tag,
+                        "Failed to query purchases: ${billingResult.debugMessage}"
+                    )
                 }
+
+            } catch (error: Exception) {
+
+                Log.e(
+                    tag,
+                    "Error processing Google Play purchases",
+                    error
+                )
+
+            } finally {
+
+                latch.countDown()
             }
+        }
+
+        try {
+
+            val completed =
+                latch.await(
+                    10,
+                    TimeUnit.SECONDS
+                )
+
+            if (!completed) {
+
+                Log.e(
+                    tag,
+                    "Timed out waiting for Google Play purchase query"
+                )
+
+                return JSONArray().toString()
+            }
+
+        } catch (interrupted: InterruptedException) {
+
+            Thread.currentThread().interrupt()
+
+            Log.e(
+                tag,
+                "Google Play purchase query interrupted",
+                interrupted
+            )
+
+            return JSONArray().toString()
         }
 
         return resultJson.toString()
