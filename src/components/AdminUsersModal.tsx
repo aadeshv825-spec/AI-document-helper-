@@ -5,7 +5,6 @@ import {
   ShieldCheck,
   Crown,
   Search,
-  UserCheck,
   UserX,
   Sparkles,
   RefreshCw,
@@ -14,42 +13,54 @@ import {
   Calendar,
   Mail,
   User,
-  ExternalLink,
 } from 'lucide-react';
 import { AdminUserItem, PlanTier } from '../types';
 import { useAuth } from '../context/AuthContext';
+import { apiFetch } from '../utils/apiClient';
 
 interface AdminUsersModalProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
-export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClose }) => {
-  const { user: currentUser, getAuthHeaders, refreshUsage, updatePlan } = useAuth();
+export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({
+  isOpen,
+  onClose,
+}) => {
+  const { user: currentUser, getAuthHeaders, refreshUsage } = useAuth();
+
   const [users, setUsers] = useState<AdminUserItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [planFilter, setPlanFilter] = useState<'all' | 'free' | 'pro'>('all');
   const [processingUserId, setProcessingUserId] = useState<string | null>(null);
-  const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [notification, setNotification] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
 
-  // Fetch users from server on open
   const fetchUsers = async () => {
     setIsLoading(true);
+
     try {
-      const res = await fetch('/api/admin/users', {
+      const res = await apiFetch('/api/admin/users', {
         headers: getAuthHeaders(),
       });
+
       if (res.ok) {
         const data = await res.json();
+
         if (Array.isArray(data.users)) {
           setUsers(data.users);
         }
       } else {
         const err = await res.json().catch(() => ({}));
+
         setNotification({
           type: 'error',
-          message: err.error || 'Failed to load users list. Admin privileges required.',
+          message:
+            err.error ||
+            'Failed to load users list. Admin privileges required.',
         });
       }
     } catch {
@@ -72,45 +83,63 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
   }, [isOpen]);
 
   const handleTogglePlan = async (targetUser: AdminUserItem) => {
-    const newPlan: PlanTier = targetUser.plan === 'pro' ? 'free' : 'pro';
+    const newPlan: PlanTier =
+      targetUser.plan === 'pro' ? 'free' : 'pro';
+
     setProcessingUserId(targetUser.id);
     setNotification(null);
 
     try {
-      const res = await fetch(`/api/admin/users/${targetUser.id}/plan`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders(),
-        },
-        body: JSON.stringify({ plan: newPlan }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to update plan status.');
-      }
-
-      // Update state locally
-      setUsers((prev) =>
-        prev.map((u) => (u.id === targetUser.id ? { ...u, plan: newPlan } : u))
+      const res = await apiFetch(
+        `/api/admin/users/${targetUser.id}/plan`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...getAuthHeaders(),
+          },
+          body: JSON.stringify({
+            plan: newPlan,
+          }),
+        }
       );
 
-      // If owner modified their own account, synchronize active session
-      if (currentUser && currentUser.id === targetUser.id) {
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(
+          data.error || 'Failed to update plan status.'
+        );
+      }
+
+      setUsers((prev) =>
+        prev.map((u) =>
+          u.id === targetUser.id
+            ? { ...u, plan: newPlan }
+            : u
+        )
+      );
+
+      if (
+        currentUser &&
+        currentUser.id === targetUser.id
+      ) {
         await refreshUsage();
       }
 
       setNotification({
         type: 'success',
-        message: newPlan === 'pro'
-          ? `✓ Pro access granted to ${targetUser.name} (${targetUser.email}). Unlimited AI access is now active!`
-          : `✓ Pro access removed from ${targetUser.name} (${targetUser.email}). Account reverted to Free limits.`,
+        message:
+          newPlan === 'pro'
+            ? `✓ Pro access granted to ${targetUser.name} (${targetUser.email}). Unlimited AI access is now active!`
+            : `✓ Pro access removed from ${targetUser.name} (${targetUser.email}). Account reverted to Free limits.`,
       });
     } catch (err: any) {
       setNotification({
         type: 'error',
-        message: err.message || 'Error occurred while updating user plan.',
+        message:
+          err.message ||
+          'Error occurred while updating user plan.',
       });
     } finally {
       setProcessingUserId(null);
@@ -119,22 +148,35 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
 
   const filteredUsers = useMemo(() => {
     return users.filter((u) => {
-      // Plan filter
-      if (planFilter !== 'all' && u.plan !== planFilter) return false;
+      if (
+        planFilter !== 'all' &&
+        u.plan !== planFilter
+      ) {
+        return false;
+      }
 
-      // Search query
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
-        const matchName = u.name.toLowerCase().includes(q);
-        const matchEmail = u.email.toLowerCase().includes(q);
-        if (!matchName && !matchEmail) return false;
+
+        const matchName =
+          u.name.toLowerCase().includes(q);
+
+        const matchEmail =
+          u.email.toLowerCase().includes(q);
+
+        if (!matchName && !matchEmail) {
+          return false;
+        }
       }
+
       return true;
     });
   }, [users, planFilter, searchQuery]);
 
   const totalUsers = users.length;
-  const proCount = users.filter((u) => u.plan === 'pro').length;
+  const proCount = users.filter(
+    (u) => u.plan === 'pro'
+  ).length;
   const freeCount = totalUsers - proCount;
 
   if (!isOpen) return null;
@@ -143,27 +185,41 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
     <AnimatePresence>
       <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/85 backdrop-blur-sm">
         <motion.div
-          initial={{ opacity: 0, scale: 0.96, y: 8 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.96, y: 8 }}
+          initial={{
+            opacity: 0,
+            scale: 0.96,
+            y: 8,
+          }}
+          animate={{
+            opacity: 1,
+            scale: 1,
+            y: 0,
+          }}
+          exit={{
+            opacity: 0,
+            scale: 0.96,
+            y: 8,
+          }}
           transition={{ duration: 0.2 }}
           className="relative w-full max-w-2xl bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl overflow-hidden max-h-[92vh] flex flex-col"
         >
-          {/* Header */}
           <div className="p-4 sm:p-5 border-b border-slate-800 bg-gradient-to-r from-amber-500/10 via-slate-900 to-indigo-500/10 flex items-center justify-between shrink-0">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-amber-500 to-amber-300 flex items-center justify-center text-slate-950 font-bold shadow-md">
                 <ShieldCheck className="w-5 h-5 fill-current" />
               </div>
+
               <div>
                 <div className="flex items-center gap-2">
                   <h2 className="text-base sm:text-lg font-bold text-slate-100">
                     Manage Users & Pro Access
                   </h2>
+
                   <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40">
                     Owner Area
                   </span>
                 </div>
+
                 <p className="text-xs text-slate-400 mt-0.5">
                   Grant or revoke full Pro privileges securely in database
                 </p>
@@ -179,25 +235,39 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
             </button>
           </div>
 
-          {/* Quick Stats Strip */}
           <div className="grid grid-cols-3 gap-2 p-3 sm:p-4 bg-slate-900/80 border-b border-slate-800 text-xs shrink-0">
             <div className="p-2.5 rounded-xl bg-slate-800/60 border border-slate-700/60 text-center">
-              <span className="text-slate-400 block text-[11px]">Total Accounts</span>
-              <span className="text-base sm:text-lg font-bold text-slate-100">{totalUsers}</span>
+              <span className="text-slate-400 block text-[11px]">
+                Total Accounts
+              </span>
+
+              <span className="text-base sm:text-lg font-bold text-slate-100">
+                {totalUsers}
+              </span>
             </div>
+
             <div className="p-2.5 rounded-xl bg-amber-950/30 border border-amber-500/30 text-center">
               <span className="text-amber-300/80 block text-[11px] flex items-center justify-center gap-1">
-                <Crown className="w-3 h-3 fill-amber-400 text-amber-400 inline" /> Pro Members
+                <Crown className="w-3 h-3 fill-amber-400 text-amber-400 inline" />
+                Pro Members
               </span>
-              <span className="text-base sm:text-lg font-bold text-amber-300">{proCount}</span>
+
+              <span className="text-base sm:text-lg font-bold text-amber-300">
+                {proCount}
+              </span>
             </div>
+
             <div className="p-2.5 rounded-xl bg-slate-800/60 border border-slate-700/60 text-center">
-              <span className="text-slate-400 block text-[11px]">Free Tier</span>
-              <span className="text-base sm:text-lg font-bold text-slate-300">{freeCount}</span>
+              <span className="text-slate-400 block text-[11px]">
+                Free Tier
+              </span>
+
+              <span className="text-base sm:text-lg font-bold text-slate-300">
+                {freeCount}
+              </span>
             </div>
           </div>
 
-          {/* Notification Banner */}
           {notification && (
             <div
               className={`p-3 text-xs flex items-start gap-2 border-b shrink-0 ${
@@ -211,7 +281,11 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
               ) : (
                 <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
               )}
-              <div className="flex-1 font-medium">{notification.message}</div>
+
+              <div className="flex-1 font-medium">
+                {notification.message}
+              </div>
+
               <button
                 onClick={() => setNotification(null)}
                 className="text-slate-400 hover:text-slate-200 p-0.5"
@@ -221,14 +295,16 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
             </div>
           )}
 
-          {/* Controls: Search & Plan Filter */}
           <div className="p-3 sm:p-4 border-b border-slate-800 bg-slate-900/60 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 shrink-0">
             <div className="relative flex-1">
               <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+
               <input
                 type="text"
                 value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                onChange={(e) =>
+                  setSearchQuery(e.target.value)
+                }
                 placeholder="Search user by name or email..."
                 className="w-full pl-9 pr-3 py-1.5 bg-slate-800/80 border border-slate-700 text-xs rounded-xl text-slate-200 placeholder-slate-400 focus:outline-none focus:border-amber-500 transition-colors"
               />
@@ -246,6 +322,7 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
                 >
                   All ({totalUsers})
                 </button>
+
                 <button
                   onClick={() => setPlanFilter('pro')}
                   className={`px-2.5 py-1 rounded-lg font-medium transition-colors flex items-center gap-1 ${
@@ -254,8 +331,10 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
                       : 'text-slate-400 hover:text-amber-300'
                   }`}
                 >
-                  <Crown className="w-3 h-3 fill-current" /> Pro ({proCount})
+                  <Crown className="w-3 h-3 fill-current" />
+                  Pro ({proCount})
                 </button>
+
                 <button
                   onClick={() => setPlanFilter('free')}
                   className={`px-2.5 py-1 rounded-lg font-medium transition-colors ${
@@ -274,37 +353,61 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
                 title="Refresh user records"
                 className="p-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-slate-300 hover:text-white transition-colors"
               >
-                <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+                <RefreshCw
+                  className={`w-3.5 h-3.5 ${
+                    isLoading ? 'animate-spin' : ''
+                  }`}
+                />
               </button>
             </div>
           </div>
 
-          {/* User Cards List */}
           <div className="p-3 sm:p-4 overflow-y-auto flex-1 space-y-2.5">
             {isLoading && users.length === 0 ? (
               <div className="py-12 text-center text-slate-400 text-xs flex flex-col items-center justify-center gap-2">
                 <RefreshCw className="w-6 h-6 animate-spin text-amber-400" />
-                <span>Loading registered user accounts...</span>
+                <span>
+                  Loading registered user accounts...
+                </span>
               </div>
             ) : filteredUsers.length === 0 ? (
               <div className="py-12 text-center text-slate-400 text-xs bg-slate-800/20 border border-slate-800 rounded-2xl p-6">
                 <User className="w-8 h-8 mx-auto text-slate-500 mb-2" />
-                <p className="font-semibold text-slate-300">No users found</p>
+
+                <p className="font-semibold text-slate-300">
+                  No users found
+                </p>
+
                 <p className="text-[11px] text-slate-500 mt-1">
-                  {searchQuery ? 'Try adjusting your search terms.' : 'No registered users match this filter.'}
+                  {searchQuery
+                    ? 'Try adjusting your search terms.'
+                    : 'No registered users match this filter.'}
                 </p>
               </div>
             ) : (
               filteredUsers.map((item) => {
-                const isItemPro = item.plan === 'pro';
-                const isProcessing = processingUserId === item.id;
-                const isCurrentUser = currentUser?.id === item.id;
-                const isOwnerAccount = item.isAdmin || item.email.toLowerCase() === 'aadeshv825@gmail.com';
-                const joinDate = new Date(item.createdAt).toLocaleDateString('en-US', {
-                  month: 'short',
-                  day: 'numeric',
-                  year: 'numeric',
-                });
+                const isItemPro =
+                  item.plan === 'pro';
+
+                const isProcessing =
+                  processingUserId === item.id;
+
+                const isCurrentUser =
+                  currentUser?.id === item.id;
+
+                const isOwnerAccount =
+                  item.isAdmin ||
+                  item.email.toLowerCase() ===
+                    'aadeshv825@gmail.com';
+
+                const joinDate =
+                  new Date(
+                    item.createdAt
+                  ).toLocaleDateString('en-US', {
+                    month: 'short',
+                    day: 'numeric',
+                    year: 'numeric',
+                  });
 
                 return (
                   <div
@@ -316,7 +419,6 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
                     } flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3`}
                   >
                     <div className="flex items-center gap-3 min-w-0">
-                      {/* Avatar */}
                       <div
                         className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-sm shrink-0 border ${
                           isItemPro
@@ -324,14 +426,16 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
                             : 'bg-slate-700/40 border-slate-600/50 text-slate-300'
                         }`}
                       >
-                        {item.name ? item.name.charAt(0).toUpperCase() : 'U'}
+                        {item.name
+                          ? item.name.charAt(0).toUpperCase()
+                          : 'U'}
                       </div>
 
-                      {/* User Info */}
                       <div className="min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="text-xs sm:text-sm font-semibold text-slate-100 truncate">
-                            {item.name || 'Unnamed User'}
+                            {item.name ||
+                              'Unnamed User'}
                           </span>
 
                           {isOwnerAccount && (
@@ -352,7 +456,9 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
                             <Mail className="w-3 h-3 text-slate-500" />
                             {item.email}
                           </span>
+
                           <span>•</span>
+
                           <span className="flex items-center gap-1 shrink-0">
                             <Calendar className="w-3 h-3 text-slate-500" />
                             Joined {joinDate}
@@ -361,9 +467,7 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
                       </div>
                     </div>
 
-                    {/* Right side: Plan Badge & Toggle Button */}
                     <div className="flex items-center gap-2.5 self-end sm:self-auto shrink-0 w-full sm:w-auto justify-between sm:justify-end pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-700/40">
-                      {/* Current Status Pill */}
                       <div>
                         {isItemPro ? (
                           <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
@@ -377,11 +481,12 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
                         )}
                       </div>
 
-                      {/* Action Button: Give Pro / Remove Pro */}
                       <button
                         id={`btn-toggle-pro-${item.id}`}
                         disabled={isProcessing}
-                        onClick={() => handleTogglePlan(item)}
+                        onClick={() =>
+                          handleTogglePlan(item)
+                        }
                         className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all active:scale-95 shadow-sm ${
                           isItemPro
                             ? 'bg-slate-800 hover:bg-red-950/60 text-slate-300 hover:text-red-300 border border-slate-700 hover:border-red-800/60'
@@ -412,11 +517,11 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
             )}
           </div>
 
-          {/* Footer */}
           <div className="p-3 sm:p-4 border-t border-slate-800 bg-slate-900/90 flex items-center justify-between text-xs text-slate-400 shrink-0">
             <span className="text-[11px] text-slate-500">
               Changes take effect immediately across all client sessions.
             </span>
+
             <button
               onClick={onClose}
               className="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl font-medium transition-colors"
