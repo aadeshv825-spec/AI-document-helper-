@@ -1,4 +1,3 @@
-
 package com.aidocumenthelper.app
 
 import android.content.Intent
@@ -73,7 +72,6 @@ class GoogleSignInManager(
                             .addCredentialOption(googleIdOption)
                             .build()
 
-                    // Credential Manager must run from the Main coroutine.
                     val response: GetCredentialResponse =
                         credentialManager.getCredential(
                             activity,
@@ -285,7 +283,6 @@ class GoogleSignInManager(
     ) {
         val payload =
             JSONObject().apply {
-                put("type", "NATIVE_GOOGLE_AUTH_SUCCESS")
                 put("idToken", idToken)
                 put("email", email)
                 put("displayName", displayName)
@@ -306,12 +303,8 @@ class GoogleSignInManager(
                             { detail: data }
                         )
                     );
-
-                    if (window.onNativeGoogleSignInSuccess) {
-                        window.onNativeGoogleSignInSuccess(data);
-                    }
                 } catch (err) {
-                    console.error(err);
+                    console.error('Google Sign-In success event error:', err);
                 }
             })();
             """.trimIndent()
@@ -327,7 +320,6 @@ class GoogleSignInManager(
     ) {
         val payload =
             JSONObject().apply {
-                put("type", "NATIVE_GOOGLE_AUTH_ERROR")
                 put("error", errorMessage)
                 put("code", errorCode)
             }.toString()
@@ -346,12 +338,8 @@ class GoogleSignInManager(
                             { detail: data }
                         )
                     );
-
-                    if (window.onNativeGoogleSignInError) {
-                        window.onNativeGoogleSignInError(data);
-                    }
                 } catch (err) {
-                    console.error(err);
+                    console.error('Google Sign-In error event error:', err);
                 }
             })();
             """.trimIndent()
