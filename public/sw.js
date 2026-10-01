@@ -1,10 +1,13 @@
-const CACHE_NAME = 'dochelper-v2.4';
+
+const CACHE_NAME = 'dochelper-v2.5';
+
+const APP_BASE_URL = self.registration.scope;
+
 const STATIC_ASSETS = [
-  '/',
-  '/index.html',
-  '/manifest.json',
-  '/icon.svg',
-];
+  'index.html',
+  'manifest.json',
+  'icon.svg',
+].map((file) => new URL(file, APP_BASE_URL).toString());
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -12,6 +15,7 @@ self.addEventListener('install', (event) => {
       return cache.addAll(STATIC_ASSETS);
     })
   );
+
   self.skipWaiting();
 });
 
@@ -19,65 +23,96 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) => {
       return Promise.all(
-        keys.map((key) => {
-          if (key !== CACHE_NAME) {
-            return caches.delete(key);
-          }
-        })
+        keys
+          .filter((key) => key.startsWith('dochelper-') && key !== CACHE_NAME)
+          .map((key) => caches.delete(key))
       );
     })
   );
+
   self.clients.claim();
 });
 
 self.addEventListener('fetch', (event) => {
-  const url = new URL(event.request.url);
+  const request = event.request;
 
-  // Never cache API requests
-  if (url.pathname.startsWith('/api/')) {
-    event.respondWith(
-      fetch(event.request).catch(() => {
-        return new Response(
-          JSON.stringify({ error: 'You are currently offline. Please reconnect to use AI services.' }),
-          { status: 503, headers: { 'Content-Type': 'application/json' } }
-        );
-      })
-    );
+  if (request.method !== 'GET') {
     return;
   }
 
-  // Cache-first / stale-while-revalidate for static files
+  const url = new URL(request.url);
+
+  // Never cache API requests.
+  if (url.pathname.includes('/api/')) {
+    event.respondWith(
+      fetch(request).catch(() => {
+        return new Response(
+          JSON.stringify({
+            error: 'You are currently offline. Please reconnect to use AI services.'
+          }),
+          {
+            status: 503,
+            headers: {
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+      })
+    );
+
+    return;
+  }
+
+  // Cache-first with background updates.
   event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
+    caches.match(request).then((cachedResponse) => {
       if (cachedResponse) {
-        // Fetch background update
-        fetch(event.request)
+        fetch(request)
           .then((networkResponse) => {
             if (networkResponse && networkResponse.status === 200) {
               caches.open(CACHE_NAME).then((cache) => {
-                cache.put(event.request, networkResponse.clone());
+                cache.put(request, networkResponse.clone());
               });
             }
           })
           .catch(() => {});
+
         return cachedResponse;
       }
 
-      return fetch(event.request).then((networkResponse) => {
-        if (!networkResponse || networkResponse.status !== 200 || networkResponse.type !== 'basic') {
+      return fetch(request)
+        .then((networkResponse) => {
+          if (
+            !networkResponse ||
+            networkResponse.status !== 200 ||
+            networkResponse.type !== 'basic'
+          ) {
+            return networkResponse;
+          }
+
+          const responseToCache = networkResponse.clone();
+
+          caches.open(CACHE_NAME).then((cache) => {
+            cache.put(request, responseToCache);
+          });
+
           return networkResponse;
-        }
-        const responseToCache = networkResponse.clone();
-        caches.open(CACHE_NAME).then((cache) => {
-          cache.put(event.request, responseToCache);
+        })
+        .catch(() => {
+          if (request.mode === 'navigate') {
+            const fallbackUrl = new URL(
+              'index.html',
+              APP_BASE_URL
+            ).toString();
+
+            return caches.match(fallbackUrl);
+          }
+
+          return new Response('Offline', {
+            status: 503,
+            statusText: 'Service Unavailable'
+          });
         });
-        return networkResponse;
-      }).catch(() => {
-        // Fallback to index.html for navigation requests
-        if (event.request.mode === 'navigate') {
-          return caches.match('/');
-        }
-      });
     })
   );
 });
