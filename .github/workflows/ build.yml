@@ -1,3 +1,4 @@
+
 name: Build Android Release AAB
 
 on:
@@ -27,14 +28,15 @@ jobs:
           cp dist/server.cjs android/app/src/main/assets/public/server.cjs
           cp dist/server.cjs.map android/app/src/main/assets/public/server.cjs.map
 
-      - name: Copy web build into Android assets
+      - name: Copy complete web build into Android assets
         run: |
+          mkdir -p android/app/src/main/assets/public
           rm -rf android/app/src/main/assets/public/assets
           cp -r dist/assets android/app/src/main/assets/public/assets
-
-      - name: Update Android index.html
-        run: |
           cp dist/index.html android/app/src/main/assets/public/index.html
+          cp dist/manifest.json android/app/src/main/assets/public/manifest.json
+          cp dist/icon.svg android/app/src/main/assets/public/icon.svg
+          cp dist/sw.js android/app/src/main/assets/public/sw.js
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
