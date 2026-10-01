@@ -1,3 +1,4 @@
+
 package com.aidocumenthelper.app
 
 import android.content.Intent
@@ -18,7 +19,6 @@ import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.security.MessageDigest
 import java.util.UUID
@@ -28,6 +28,7 @@ class GoogleSignInManager(
     private val webView: WebView
 ) {
     private val tag = "GoogleSignInManager"
+
     private val credentialManager: CredentialManager =
         CredentialManager.create(activity)
 
@@ -51,6 +52,7 @@ class GoogleSignInManager(
                         }
 
                     val rawNonce = UUID.randomUUID().toString()
+
                     val digest = MessageDigest.getInstance("SHA-256")
                         .digest(rawNonce.toByteArray())
 
@@ -71,18 +73,18 @@ class GoogleSignInManager(
                             .addCredentialOption(googleIdOption)
                             .build()
 
+                    // Credential Manager must run from the Main coroutine.
                     val response: GetCredentialResponse =
-                        withContext(Dispatchers.IO) {
-                            credentialManager.getCredential(
-                                activity,
-                                request
-                            )
-                        }
+                        credentialManager.getCredential(
+                            activity,
+                            request
+                        )
 
                     handleCredentialResponse(response)
 
                 } catch (e: GetCredentialCancellationException) {
                     Log.i(tag, "Google sign-in cancelled")
+
                     sendErrorToWeb(
                         "User cancelled Google account selection",
                         "USER_CANCELLED"
@@ -94,14 +96,16 @@ class GoogleSignInManager(
                         "Credential Manager failed, using fallback",
                         e
                     )
+
                     fallbackToGoogleAccountPicker()
 
                 } catch (e: Exception) {
-                    Log.w(
+                    Log.e(
                         tag,
                         "Google sign-in failed, using fallback",
                         e
                     )
+
                     fallbackToGoogleAccountPicker()
                 }
             }
@@ -142,6 +146,7 @@ class GoogleSignInManager(
                     "Failed to parse Google credential",
                     e
                 )
+
                 fallbackToGoogleAccountPicker()
             }
         } else {
@@ -174,6 +179,7 @@ class GoogleSignInManager(
                     photoUrl =
                         account.photoUrl?.toString() ?: ""
                 )
+
                 return
             }
 
@@ -220,6 +226,7 @@ class GoogleSignInManager(
                 "Google Sign-In was cancelled",
                 "USER_CANCELLED"
             )
+
             return
         }
 
@@ -241,6 +248,7 @@ class GoogleSignInManager(
                     "Google did not return a valid account",
                     "INVALID_ACCOUNT"
                 )
+
                 return
             }
 
@@ -284,14 +292,14 @@ class GoogleSignInManager(
                 put("photoUrl", photoUrl)
             }.toString()
 
-        val escaped =
-            JSONObject.quote(payload)
+        val escaped = JSONObject.quote(payload)
 
         val js =
             """
             (function() {
                 try {
                     var data = JSON.parse($escaped);
+
                     window.dispatchEvent(
                         new CustomEvent(
                             'onNativeGoogleSignInSuccess',
@@ -324,14 +332,14 @@ class GoogleSignInManager(
                 put("code", errorCode)
             }.toString()
 
-        val escaped =
-            JSONObject.quote(payload)
+        val escaped = JSONObject.quote(payload)
 
         val js =
             """
             (function() {
                 try {
                     var data = JSON.parse($escaped);
+
                     window.dispatchEvent(
                         new CustomEvent(
                             'onNativeGoogleSignInError',
