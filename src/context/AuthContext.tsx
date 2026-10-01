@@ -1,8 +1,11 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { UserProfile, UsageStats, PlanTier, AdminUserItem } from '../types';
 import { logger } from '../utils/logger';
-import { isNativeGoogleSignInAvailable, launchNativeGoogleSignIn } from '../utils/android';
-import { apiFetch } from '../utils/apiClient';
+import {
+  cancelNativeGoogleSignInTimeout,
+  isNativeGoogleSignInAvailable,
+  launchNativeGoogleSignIn,
+} from '../utils/android';
 
 interface AuthContextType {
   user: UserProfile | null;
