@@ -1,4 +1,3 @@
-
 /**
  * Native Android integration utilities and bridge helpers.
  */
@@ -20,18 +19,21 @@ declare global {
     };
 
     onAndroidBackPressed?: () => boolean;
+  }
+}
 
-    onNativeGoogleSignInSuccess?: (data: {
-      idToken: string;
-      email: string;
-      displayName: string;
-      photoUrl: string;
-    }) => void;
+let nativeGoogleSignInTimeout: number | undefined;
 
-    onNativeGoogleSignInError?: (data: {
-      error: string;
-      code: string;
-    }) => void;
+/**
+ * Cancels the pending Google Sign-In timeout.
+ */
+export function cancelNativeGoogleSignInTimeout(): void {
+  if (
+    typeof window !== 'undefined' &&
+    nativeGoogleSignInTimeout !== undefined
+  ) {
+    window.clearTimeout(nativeGoogleSignInTimeout);
+    nativeGoogleSignInTimeout = undefined;
   }
 }
 
@@ -50,7 +52,6 @@ export function isNativeGoogleSignInAvailable(): boolean {
 
 /**
  * Starts native Android Google Sign-In.
- * Automatically reports a timeout if Android does not respond.
  */
 export function launchNativeGoogleSignIn(
   clientId?: string
@@ -64,32 +65,33 @@ export function launchNativeGoogleSignIn(
       return false;
     }
 
+    cancelNativeGoogleSignInTimeout();
+
     bridge.launchGoogleSignIn(clientId);
 
-    window.setTimeout(() => {
-      const timeoutError = {
-        error: 'Google Sign-In timed out. Please try again.',
-        code: 'TIMEOUT',
-      };
+    nativeGoogleSignInTimeout = window.setTimeout(() => {
+      nativeGoogleSignInTimeout = undefined;
 
       window.dispatchEvent(
         new CustomEvent('onNativeGoogleSignInError', {
-          detail: timeoutError,
+          detail: {
+            error: 'Google Sign-In timed out. Please try again.',
+            code: 'TIMEOUT',
+          },
         })
       );
-
-      window.onNativeGoogleSignInError?.(timeoutError);
-    }, 60000);
+    }, 120000);
 
     return true;
   } catch (error) {
+    cancelNativeGoogleSignInTimeout();
     console.error('Native Google Sign-In launch failed:', error);
     return false;
   }
 }
 
 /**
- * Checks whether the app is executing inside the native Android container.
+ * Checks whether the app is executing inside native Android.
  */
 export function isNativeAndroid(): boolean {
   if (typeof window === 'undefined') return false;
@@ -165,7 +167,6 @@ export async function shareNativeDocument(
     if (err?.name === 'AbortError') return false;
   }
 
-  // Fallback to clipboard.
   try {
     if (window.AndroidBridge?.copyToClipboard) {
       window.AndroidBridge.copyToClipboard(text);
