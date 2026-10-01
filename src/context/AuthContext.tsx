@@ -241,20 +241,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         return await new Promise((resolve) => {
           let finished = false;
+          let processingSuccess = false;
 
           const cleanup = () => {
+            cancelNativeGoogleSignInTimeout();
+
             window.removeEventListener(
-              'onNativeGoogleSignInSuccess' as any,
-              handleSuccess
+              'onNativeGoogleSignInSuccess',
+              handleSuccess as EventListener
             );
 
             window.removeEventListener(
-              'onNativeGoogleSignInError' as any,
-              handleError
+              'onNativeGoogleSignInError',
+              handleError as EventListener
             );
-
-            delete window.onNativeGoogleSignInSuccess;
-            delete window.onNativeGoogleSignInError;
           };
 
           const finish = (result: {
@@ -269,7 +269,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           };
 
           const handleSuccess = async (event: any) => {
+            if (finished || processingSuccess) return;
+
+            processingSuccess = true;
+
             const payload = event.detail || event;
+
+            if (!payload?.idToken) {
+              processingSuccess = false;
+
+              finish({
+                success: false,
+                error: 'Google did not return a valid ID token.',
+              });
+
+              return;
+            }
 
             try {
               const res = await apiFetch('/api/auth/google/native', {
@@ -306,12 +321,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 setUsage(data.usage);
               }
 
-              logger.info(
-                'Android Google Sign-In successful',
-                {
-                  email: data.user?.email,
-                }
-              );
+              logger.info('Android Google Sign-In successful', {
+                email: data.user?.email,
+              });
 
               finish({ success: true });
             } catch (err) {
@@ -328,6 +340,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           };
 
           const handleError = (event: any) => {
+            if (finished) return;
+
             const errorDetail = event.detail || event;
 
             if (errorDetail?.code === 'USER_CANCELLED') {
@@ -346,26 +360,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           };
 
           window.addEventListener(
-            'onNativeGoogleSignInSuccess' as any,
-            handleSuccess
+            'onNativeGoogleSignInSuccess',
+            handleSuccess as EventListener
           );
 
           window.addEventListener(
-            'onNativeGoogleSignInError' as any,
-            handleError
+            'onNativeGoogleSignInError',
+            handleError as EventListener
           );
-
-          window.onNativeGoogleSignInSuccess = (data) =>
-            handleSuccess({ detail: data });
-
-          window.onNativeGoogleSignInError = (data) =>
-            handleError({ detail: data });
 
           const launched = launchNativeGoogleSignIn(WEB_CLIENT_ID);
 
           if (!launched) {
-            cleanup();
-
             finish({
               success: false,
               error: 'Native Google Sign-In is unavailable.',
