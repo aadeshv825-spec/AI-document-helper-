@@ -57,7 +57,6 @@ const DOCUMENTS_FILE = path.join(DATA_DIR, 'documents.json');
 const USAGE_FILE = path.join(DATA_DIR, 'usage.json');
 const PURCHASES_FILE = path.join(DATA_DIR, 'purchases.json');
 
-// Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
@@ -71,6 +70,7 @@ function readJsonFile<T>(filePath: string, defaultValue: T): T {
   } catch (err) {
     console.error(`Error reading ${filePath}:`, err);
   }
+
   return defaultValue;
 }
 
@@ -82,27 +82,39 @@ function writeJsonFile<T>(filePath: string, data: T): void {
   }
 }
 
-// In-memory cache for speed, backed by file writes
 let users: StoredUser[] = readJsonFile<StoredUser[]>(USERS_FILE, []);
 let sessions: StoredSession[] = readJsonFile<StoredSession[]>(SESSIONS_FILE, []);
 let documents: StoredDocument[] = readJsonFile<StoredDocument[]>(DOCUMENTS_FILE, []);
 let usageMap: Record<string, number> = readJsonFile<Record<string, number>>(USAGE_FILE, {});
-let purchases: GooglePlayPurchaseRecord[] = readJsonFile<GooglePlayPurchaseRecord[]>(PURCHASES_FILE, []);
+let purchases: GooglePlayPurchaseRecord[] = readJsonFile<GooglePlayPurchaseRecord[]>(PURCHASES_FILE, {});
 
 // App owner & admin email
-export const OWNER_EMAIL = (process.env.OWNER_EMAIL || 'aadeshv825@gmail.com').toLowerCase();
+export const OWNER_EMAIL = (
+  process.env.OWNER_EMAIL || 'aadeshv825@gmail.com'
+).trim().toLowerCase();
 
+/**
+ * Admin access:
+ * - The owner must have a Google ID and admin role.
+ * - Other admin accounts require an explicitly assigned admin role.
+ */
 export function isUserAdmin(user: StoredUser | null | undefined): boolean {
   if (!user) return false;
-  if (user.role === 'admin') return true;
-  if (user.email && user.email.toLowerCase() === OWNER_EMAIL) return true;
-  return false;
+
+  if (user.email?.trim().toLowerCase() === OWNER_EMAIL) {
+    return Boolean(user.googleId) && user.role === 'admin';
+  }
+
+  return user.role === 'admin';
 }
 
-// Ensure the owner account has admin role
-const ownerUser = users.find((u) => u.email.toLowerCase() === OWNER_EMAIL);
+// Only a Google-linked owner account can receive the owner admin role.
+const ownerUser = users.find(
+  (u) => u.email.trim().toLowerCase() === OWNER_EMAIL
+);
+
 if (ownerUser) {
-  ownerUser.role = 'admin';
+  ownerUser.role = ownerUser.googleId ? 'admin' : 'user';
   writeJsonFile(USERS_FILE, users);
 }
 
@@ -125,6 +137,11 @@ export function registerUser(
 ): { user: StoredUser; token: string } {
   const normalizedEmail = email.trim().toLowerCase();
 
+  // The owner account must use verified Google authentication.
+  if (normalizedEmail === OWNER_EMAIL) {
+    throw new Error('Owner account must sign in with Google.');
+  }
+
   if (users.some((u) => u.email.toLowerCase() === normalizedEmail)) {
     throw new Error('An account with this email address already exists. Please sign in.');
   }
@@ -139,6 +156,7 @@ export function registerUser(
     passwordHash,
     salt,
     plan: 'free',
+    role: 'user',
     createdAt: Date.now(),
     preferredLanguage: 'English',
   };
@@ -191,6 +209,10 @@ export function findOrCreateGoogleUser(profile: {
   if (user) {
     user.googleId = profile.googleId;
 
+    if (normalizedEmail === OWNER_EMAIL) {
+      user.role = 'admin';
+    }
+
     if (profile.avatarUrl) {
       user.avatarUrl = profile.avatarUrl;
     }
@@ -213,6 +235,7 @@ export function findOrCreateGoogleUser(profile: {
       avatarUrl: profile.avatarUrl,
       authProvider: 'google',
       plan: 'free',
+      role: normalizedEmail === OWNER_EMAIL ? 'admin' : 'user',
       createdAt: Date.now(),
       preferredLanguage: 'English',
     };
