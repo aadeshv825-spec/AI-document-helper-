@@ -94,18 +94,37 @@ app.use('/api/', (req, res, next) => {
 });
 
 // Helper for extracting authenticated user & rate limiting identifier
-function isProActive(user: StoredUser | null): boolean {
+function isProActive(
+  user: Pick<StoredUser, 'id' | 'plan' | 'proUntil'> | null
+): boolean {
   if (!user || user.plan !== 'pro') return false;
 
-  // No expiry date means the Pro plan remains active.
-  if (!user.proUntil) return true;
+  // Legacy Pro accounts without an expiry remain active.
+  if (user.proUntil == null) return true;
 
-  const expiryTime =
-    typeof user.proUntil === 'number'
-      ? user.proUntil
-      : new Date(user.proUntil).getTime();
+  const expiryTime = user.proUntil;
 
-  return Number.isFinite(expiryTime) && expiryTime > Date.now();
+  if (
+    Number.isFinite(expiryTime) &&
+    expiryTime > Date.now()
+  ) {
+    return true;
+  }
+
+  // Downgrade expired Pro accounts and persist the change.
+  try {
+    updateUserPlan(user.id, 'free');
+  } catch (error) {
+    console.error(
+      '[ProExpiry] Failed to persist expired Pro downgrade:',
+      error
+    );
+  }
+
+  user.plan = 'free';
+  user.proUntil = undefined;
+
+  return false;
 }
 
 function getAuthContext(req: express.Request): {
@@ -983,14 +1002,16 @@ Return STRICTLY valid JSON:
 // =============================================================
 
 function serializeUser(user: StoredUser) {
+  const proActive = isProActive(user);
+
   return {
     id: user.id,
     name: user.name,
     email: user.email,
-    plan: user.plan,
+    plan: proActive ? 'pro' : 'free',
     role: isUserAdmin(user) ? 'admin' : 'user',
     isAdmin: isUserAdmin(user),
-    proUntil: user.proUntil,
+    proUntil: proActive ? user.proUntil : undefined,
     createdAt: user.createdAt,
     preferredLanguage: user.preferredLanguage,
     avatarUrl: user.avatarUrl,
@@ -1033,7 +1054,7 @@ app.post('/api/auth/register', (req, res) => {
 
     const usage = getDailyUsage(
       user.id,
-      user.plan === 'pro'
+      isProActive(user)
     );
 
     res.json({
@@ -1074,7 +1095,7 @@ app.post('/api/auth/login', (req, res) => {
 
     const usage = getDailyUsage(
       user.id,
-      user.plan === 'pro'
+      isProActive(user)
     );
 
     res.json({
@@ -1355,7 +1376,7 @@ app.post('/api/auth/google/native', async (req, res) => {
 
     const usage = getDailyUsage(
       user.id,
-      user.plan === 'pro'
+      isProActive(user)
     );
 
     console.log(
@@ -1628,7 +1649,7 @@ app.get(
 
       const usage = getDailyUsage(
         user.id,
-        user.plan === 'pro'
+        isProActive(user)
       );
 
       res.send(`
@@ -1802,7 +1823,7 @@ app.get('/api/auth/me', (req, res) => {
   const usage =
     getDailyUsage(
       user.id,
-      user.plan === 'pro'
+      isProActive(user)
     );
 
   res.json({
@@ -1908,10 +1929,7 @@ app.get('/api/user/usage', (req, res) => {
 
   res.json({
     usage,
-    plan:
-      user
-        ? user.plan
-        : 'free',
+    plan: isPro ? 'pro' : 'free',
   });
 });
 
@@ -2730,15 +2748,16 @@ app.get(
       getAllUsers();
 
     const usersWithUsage =
-      allUsers.map((u) => ({
-        ...u,
+      allUsers.map((u) => {
+        const proActive = isProActive(u);
 
-        usage:
-          getDailyUsage(
-            u.id,
-            u.plan === 'pro'
-          ),
-      }));
+        return {
+          ...u,
+          plan: proActive ? 'pro' : 'free',
+          proUntil: proActive ? u.proUntil : undefined,
+          usage: getDailyUsage(u.id, proActive),
+        };
+      });
 
     res.json({
       users:
