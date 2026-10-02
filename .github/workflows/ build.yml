@@ -1,4 +1,3 @@
-
 name: Build Android Release AAB
 
 on:
@@ -45,10 +44,23 @@ jobs:
           java-version: '17'
           cache: gradle
 
+      - name: Set Android SDK path
+        run: |
+          if [ -z "$ANDROID_HOME" ]; then
+            echo "ERROR: ANDROID_HOME is not configured on this runner."
+            exit 1
+          fi
+          echo "sdk.dir=$ANDROID_HOME" > android/local.properties
+          cat android/local.properties
+
       - name: Restore upload keystore
         env:
           NEW_UPLOAD_KEYSTORE_BASE64: ${{ secrets.NEW_UPLOAD_KEYSTORE_BASE64 }}
         run: |
+          if [ -z "$NEW_UPLOAD_KEYSTORE_BASE64" ]; then
+            echo "ERROR: NEW_UPLOAD_KEYSTORE_BASE64 secret is missing."
+            exit 1
+          fi
           printf '%s' "$NEW_UPLOAD_KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
           chmod 600 android/app/upload-keystore.jks
 
@@ -56,6 +68,10 @@ jobs:
         env:
           NEW_UPLOAD_KEY_PASSWORD: ${{ secrets.NEW_UPLOAD_KEY_PASSWORD }}
         run: |
+          if [ -z "$NEW_UPLOAD_KEY_PASSWORD" ]; then
+            echo "ERROR: NEW_UPLOAD_KEY_PASSWORD secret is missing."
+            exit 1
+          fi
           keytool -list \
             -v \
             -keystore android/app/upload-keystore.jks \
