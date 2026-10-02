@@ -6,7 +6,6 @@ import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
@@ -42,6 +41,8 @@ class MainActivity : AppCompatActivity() {
     private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
     private var currentCameraPhotoUri: Uri? = null
 
+    private var pendingWebPermissionRequest: PermissionRequest? = null
+
     private val appAssetUrl =
         "https://appassets.androidplatform.net/assets/public/index.html"
 
@@ -53,8 +54,75 @@ class MainActivity : AppCompatActivity() {
             val cameraGranted =
                 permissions[Manifest.permission.CAMERA] ?: false
 
+            val pendingRequest =
+                pendingWebPermissionRequest
+
+            pendingWebPermissionRequest = null
+
+            if (
+                cameraGranted &&
+                pendingRequest != null &&
+                !isFinishing &&
+                !isDestroyed
+            ) {
+                try {
+                    val requestedResources =
+                        pendingRequest.resources.toSet()
+
+                    val allowedResources =
+                        requestedResources.intersect(
+                            setOf(
+                                PermissionRequest.RESOURCE_VIDEO_CAPTURE
+                            )
+                        )
+
+                    if (
+                        allowedResources.isNotEmpty() &&
+                        ContextCompat.checkSelfPermission(
+                            this,
+                            Manifest.permission.CAMERA
+                        ) == PackageManager.PERMISSION_GRANTED
+                    ) {
+                        pendingRequest.grant(
+                            allowedResources.toTypedArray()
+                        )
+
+                        Log.d(
+                            tag,
+                            "Granted WebView camera permission"
+                        )
+                    } else {
+                        pendingRequest.deny()
+
+                        Log.w(
+                            tag,
+                            "Denied unsupported WebView permission request"
+                        )
+                    }
+                } catch (e: Exception) {
+                    Log.e(
+                        tag,
+                        "Failed to resolve WebView permission request",
+                        e
+                    )
+
+                    try {
+                        pendingRequest.deny()
+                    } catch (_: Exception) {
+                    }
+                }
+            } else if (pendingRequest != null) {
+                try {
+                    pendingRequest.deny()
+                } catch (_: Exception) {
+                }
+            }
+
             if (cameraGranted) {
-                Log.d(tag, "Camera permission granted")
+                Log.d(
+                    tag,
+                    "Camera permission granted"
+                )
             }
         }
 
@@ -71,28 +139,44 @@ class MainActivity : AppCompatActivity() {
                     when {
 
                         data?.clipData != null -> {
-                            val count = data.clipData!!.itemCount
+                            val clipData =
+                                data.clipData!!
+
+                            val count =
+                                clipData.itemCount
 
                             Array(count) { index ->
-                                data.clipData!!.getItemAt(index).uri
+                                clipData
+                                    .getItemAt(index)
+                                    .uri
                             }
                         }
 
                         data?.data != null -> {
-                            arrayOf(data.data!!)
+                            arrayOf(
+                                data.data!!
+                            )
                         }
 
                         currentCameraPhotoUri != null -> {
-                            arrayOf(currentCameraPhotoUri!!)
+                            arrayOf(
+                                currentCameraPhotoUri!!
+                            )
                         }
 
-                        else -> null
+                        else -> {
+                            null
+                        }
                     }
 
-                fileChooserCallback?.onReceiveValue(results)
+                fileChooserCallback?.onReceiveValue(
+                    results
+                )
 
             } else {
-                fileChooserCallback?.onReceiveValue(null)
+                fileChooserCallback?.onReceiveValue(
+                    null
+                )
             }
 
             fileChooserCallback = null
@@ -100,8 +184,12 @@ class MainActivity : AppCompatActivity() {
         }
 
     @SuppressLint("SetJavaScriptEnabled")
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
+    override fun onCreate(
+        savedInstanceState: Bundle?
+    ) {
+        super.onCreate(
+            savedInstanceState
+        )
 
         window.decorView.systemUiVisibility =
             View.SYSTEM_UI_FLAG_LAYOUT_STABLE
@@ -110,18 +198,18 @@ class MainActivity : AppCompatActivity() {
 
         setContentView(webView)
 
-        checkAndRequestPermissions()
+        checkAndRequestCameraPermission()
 
         setupWebView()
 
         setupBackHandler()
 
-        webView.loadUrl(appAssetUrl)
+        webView.loadUrl(
+            appAssetUrl
+        )
     }
 
-    private fun checkAndRequestPermissions() {
-
-        val permissionsToRequest = mutableListOf<String>()
+    private fun checkAndRequestCameraPermission() {
 
         if (
             ContextCompat.checkSelfPermission(
@@ -129,28 +217,10 @@ class MainActivity : AppCompatActivity() {
                 Manifest.permission.CAMERA
             ) != PackageManager.PERMISSION_GRANTED
         ) {
-            permissionsToRequest.add(
-                Manifest.permission.CAMERA
-            )
-        }
-
-        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2) {
-
-            if (
-                ContextCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.READ_EXTERNAL_STORAGE
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                permissionsToRequest.add(
-                    Manifest.permission.READ_EXTERNAL_STORAGE
-                )
-            }
-        }
-
-        if (permissionsToRequest.isNotEmpty()) {
             requestPermissionLauncher.launch(
-                permissionsToRequest.toTypedArray()
+                arrayOf(
+                    Manifest.permission.CAMERA
+                )
             )
         }
     }
@@ -158,7 +228,8 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebView() {
 
-        val settings = webView.settings
+        val settings =
+            webView.settings
 
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
@@ -177,21 +248,29 @@ class MainActivity : AppCompatActivity() {
 
         settings.useWideViewPort = true
         settings.loadWithOverviewMode = true
-        settings.cacheMode = WebSettings.LOAD_DEFAULT
+        settings.cacheMode =
+            WebSettings.LOAD_DEFAULT
 
         val customUserAgent =
             "${settings.userAgentString} AIDocumentHelperApp/1.0.0 (Android)"
 
-        settings.userAgentString = customUserAgent
+        settings.userAgentString =
+            customUserAgent
 
         val nativeBridge =
             NativeBridgeInterface(this)
 
         val playBillingBridge =
-            PlayBillingManager(this, webView)
+            PlayBillingManager(
+                this,
+                webView
+            )
 
         googleSignInBridge =
-            GoogleSignInManager(this, webView)
+            GoogleSignInManager(
+                this,
+                webView
+            )
 
         webView.addJavascriptInterface(
             nativeBridge,
@@ -215,17 +294,123 @@ class MainActivity : AppCompatActivity() {
                     request: PermissionRequest
                 ) {
                     runOnUiThread {
-                        request.grant(request.resources)
+
+                        if (
+                            isFinishing ||
+                            isDestroyed
+                        ) {
+                            try {
+                                request.deny()
+                            } catch (_: Exception) {
+                            }
+
+                            return@runOnUiThread
+                        }
+
+                        val requestedResources =
+                            request.resources.toSet()
+
+                        val cameraRequested =
+                            requestedResources.contains(
+                                PermissionRequest.RESOURCE_VIDEO_CAPTURE
+                            )
+
+                        val unsupportedRequested =
+                            requestedResources.any {
+                                it !=
+                                    PermissionRequest.RESOURCE_VIDEO_CAPTURE
+                            }
+
+                        if (
+                            !cameraRequested ||
+                            unsupportedRequested
+                        ) {
+                            Log.w(
+                                tag,
+                                "Denied unsupported WebView permission request: ${requestedResources.joinToString()}"
+                            )
+
+                            try {
+                                request.deny()
+                            } catch (_: Exception) {
+                            }
+
+                            return@runOnUiThread
+                        }
+
+                        val cameraGranted =
+                            ContextCompat.checkSelfPermission(
+                                this@MainActivity,
+                                Manifest.permission.CAMERA
+                            ) == PackageManager.PERMISSION_GRANTED
+
+                        if (cameraGranted) {
+
+                            try {
+                                request.grant(
+                                    arrayOf(
+                                        PermissionRequest.RESOURCE_VIDEO_CAPTURE
+                                    )
+                                )
+
+                                Log.d(
+                                    tag,
+                                    "Granted WebView camera permission"
+                                )
+                            } catch (e: Exception) {
+                                Log.e(
+                                    tag,
+                                    "Failed to grant WebView camera permission",
+                                    e
+                                )
+
+                                try {
+                                    request.deny()
+                                } catch (_: Exception) {
+                                }
+                            }
+
+                        } else {
+
+                            pendingWebPermissionRequest =
+                                request
+
+                            requestPermissionLauncher.launch(
+                                arrayOf(
+                                    Manifest.permission.CAMERA
+                                )
+                            )
+                        }
                     }
+                }
+
+                override fun onPermissionRequestCanceled(
+                    request: PermissionRequest
+                ) {
+                    if (
+                        pendingWebPermissionRequest ===
+                            request
+                    ) {
+                        pendingWebPermissionRequest =
+                            null
+                    }
+
+                    super.onPermissionRequestCanceled(
+                        request
+                    )
                 }
 
                 override fun onShowFileChooser(
                     view: WebView?,
-                    filePathCallback: ValueCallback<Array<Uri>>?,
-                    fileChooserParams: FileChooserParams?
+                    filePathCallback:
+                        ValueCallback<Array<Uri>>?,
+                    fileChooserParams:
+                        FileChooserParams?
                 ): Boolean {
 
-                    fileChooserCallback?.onReceiveValue(null)
+                    fileChooserCallback?.onReceiveValue(
+                        null
+                    )
 
                     fileChooserCallback =
                         filePathCallback
@@ -238,7 +423,8 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 override fun onConsoleMessage(
-                    consoleMessage: ConsoleMessage?
+                    consoleMessage:
+                        ConsoleMessage?
                 ): Boolean {
 
                     Log.d(
@@ -254,7 +440,9 @@ class MainActivity : AppCompatActivity() {
             WebViewAssetLoader.Builder()
                 .addPathHandler(
                     "/assets/",
-                    WebViewAssetLoader.AssetsPathHandler(this)
+                    WebViewAssetLoader.AssetsPathHandler(
+                        this
+                    )
                 )
                 .build()
 
@@ -298,7 +486,8 @@ class MainActivity : AppCompatActivity() {
                         return false
                     }
 
-                    val url = request.url
+                    val url =
+                        request.url
 
                     if (
                         url.scheme == "mailto" ||
@@ -313,7 +502,9 @@ class MainActivity : AppCompatActivity() {
                                     url
                                 )
 
-                            startActivity(intent)
+                            startActivity(
+                                intent
+                            )
 
                         } catch (e: Exception) {
 
@@ -333,11 +524,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun launchSystemMediaPicker(
-        params: WebChromeClient.FileChooserParams?
+        params:
+            WebChromeClient.FileChooserParams?
     ) {
 
         val takePictureIntent =
-            Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+            Intent(
+                MediaStore.ACTION_IMAGE_CAPTURE
+            )
 
         var photoFile: File? = null
 
@@ -347,36 +541,41 @@ class MainActivity : AppCompatActivity() {
                 SimpleDateFormat(
                     "yyyyMMdd_HHmmss",
                     Locale.getDefault()
-                ).format(Date())
+                ).format(
+                    Date()
+                )
 
             val storageDir =
                 getExternalFilesDir(
                     Environment.DIRECTORY_PICTURES
                 )
 
-            photoFile =
-                File.createTempFile(
-                    "SCAN_${timeStamp}_",
-                    ".jpg",
-                    storageDir
+            if (storageDir != null) {
+
+                photoFile =
+                    File.createTempFile(
+                        "SCAN_${timeStamp}_",
+                        ".jpg",
+                        storageDir
+                    )
+
+                currentCameraPhotoUri =
+                    FileProvider.getUriForFile(
+                        this,
+                        "${applicationContext.packageName}.fileprovider",
+                        photoFile
+                    )
+
+                takePictureIntent.putExtra(
+                    MediaStore.EXTRA_OUTPUT,
+                    currentCameraPhotoUri
                 )
 
-            currentCameraPhotoUri =
-                FileProvider.getUriForFile(
-                    this,
-                    "${applicationContext.packageName}.fileprovider",
-                    photoFile
+                takePictureIntent.addFlags(
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
-
-            takePictureIntent.putExtra(
-                MediaStore.EXTRA_OUTPUT,
-                currentCameraPhotoUri
-            )
-
-            takePictureIntent.addFlags(
-                Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION
-            )
+            }
 
         } catch (ex: Exception) {
 
@@ -385,10 +584,15 @@ class MainActivity : AppCompatActivity() {
                 "Error creating camera photo file",
                 ex
             )
+
+            photoFile = null
+            currentCameraPhotoUri = null
         }
 
         val contentSelectionIntent =
-            Intent(Intent.ACTION_GET_CONTENT).apply {
+            Intent(
+                Intent.ACTION_GET_CONTENT
+            ).apply {
 
                 addCategory(
                     Intent.CATEGORY_OPENABLE
@@ -407,13 +611,17 @@ class MainActivity : AppCompatActivity() {
 
         val intentArray =
             if (photoFile != null) {
-                arrayOf(takePictureIntent)
+                arrayOf(
+                    takePictureIntent
+                )
             } else {
                 emptyArray()
             }
 
         val chooserIntent =
-            Intent(Intent.ACTION_CHOOSER).apply {
+            Intent(
+                Intent.ACTION_CHOOSER
+            ).apply {
 
                 putExtra(
                     Intent.EXTRA_INTENT,
@@ -440,7 +648,8 @@ class MainActivity : AppCompatActivity() {
 
         onBackPressedDispatcher.addCallback(
             this,
-            object : OnBackPressedCallback(true) {
+            object :
+                OnBackPressedCallback(true) {
 
                 override fun handleOnBackPressed() {
 
@@ -474,15 +683,19 @@ class MainActivity : AppCompatActivity() {
 
                         if (!isHandledInWeb) {
 
-                            if (webView.canGoBack()) {
+                            if (
+                                webView.canGoBack()
+                            ) {
 
                                 webView.goBack()
 
                             } else {
 
-                                isEnabled = false
+                                isEnabled =
+                                    false
 
-                                onBackPressedDispatcher.onBackPressed()
+                                onBackPressedDispatcher
+                                    .onBackPressed()
                             }
                         }
                     }
@@ -504,16 +717,33 @@ class MainActivity : AppCompatActivity() {
 
         if (
             requestCode ==
-            GoogleSignInManager.GOOGLE_SIGN_IN_REQUEST_CODE
+                GoogleSignInManager.GOOGLE_SIGN_IN_REQUEST_CODE
         ) {
-            googleSignInBridge.handleGoogleSignInResult(
-                resultCode,
-                data
-            )
+            googleSignInBridge
+                .handleGoogleSignInResult(
+                    resultCode,
+                    data
+                )
         }
     }
 
     override fun onDestroy() {
+
+        pendingWebPermissionRequest?.let {
+            try {
+                it.deny()
+            } catch (_: Exception) {
+            }
+        }
+
+        pendingWebPermissionRequest = null
+
+        fileChooserCallback?.onReceiveValue(
+            null
+        )
+
+        fileChooserCallback = null
+        currentCameraPhotoUri = null
 
         webView.destroy()
 
