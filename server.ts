@@ -128,36 +128,6 @@ function getAuthContext(req: express.Request): {
     isPro,
   };
 }
-  const authHeader = req.headers.authorization;
-
-  const token =
-    authHeader && authHeader.startsWith('Bearer ')
-      ? authHeader.slice(7)
-      : null;
-
-  const user = token ? getUserByToken(token) : null;
-
-  const clientId = (req.headers['x-client-id'] as string) || '';
-
-  const ip =
-    (req.headers['x-forwarded-for'] as string) ||
-    req.socket.remoteAddress ||
-    '127.0.0.1';
-
-  const identifier = user
-    ? user.id
-    : clientId
-      ? `client_${clientId}`
-      : `ip_${ip}`;
-
-  const isPro = Boolean(user && user.plan === 'pro');
-
-  return {
-    user,
-    identifier,
-    isPro,
-  };
-}
 
 // Server-side AI usage check middleware helper
 function checkAiUsage(
