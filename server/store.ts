@@ -76,29 +76,64 @@ function readJsonFile<T>(filePath: string, defaultValue: T): T {
 
 function writeJsonFile<T>(filePath: string, data: T): void {
   try {
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify(data, null, 2),
+      'utf-8'
+    );
   } catch (err) {
     console.error(`Error writing ${filePath}:`, err);
   }
 }
 
-let users: StoredUser[] = readJsonFile<StoredUser[]>(USERS_FILE, []);
-let sessions: StoredSession[] = readJsonFile<StoredSession[]>(SESSIONS_FILE, []);
-let documents: StoredDocument[] = readJsonFile<StoredDocument[]>(DOCUMENTS_FILE, []);
-let usageMap: Record<string, number> = readJsonFile<Record<string, number>>(USAGE_FILE, {});
-let purchases: GooglePlayPurchaseRecord[] = readJsonFile<GooglePlayPurchaseRecord[]>(PURCHASES_FILE, {});
+let users: StoredUser[] = readJsonFile<StoredUser[]>(
+  USERS_FILE,
+  []
+);
+
+let sessions: StoredSession[] = readJsonFile<StoredSession[]>(
+  SESSIONS_FILE,
+  []
+);
+
+let documents: StoredDocument[] = readJsonFile<StoredDocument[]>(
+  DOCUMENTS_FILE,
+  []
+);
+
+let usageMap: Record<string, number> = readJsonFile<
+  Record<string, number>
+>(
+  USAGE_FILE,
+  {}
+);
+
+const storedPurchases = readJsonFile<unknown>(
+  PURCHASES_FILE,
+  []
+);
+
+let purchases: GooglePlayPurchaseRecord[] = Array.isArray(
+  storedPurchases
+)
+  ? (storedPurchases as GooglePlayPurchaseRecord[])
+  : [];
 
 // App owner & admin email
 export const OWNER_EMAIL = (
   process.env.OWNER_EMAIL || 'aadeshv825@gmail.com'
-).trim().toLowerCase();
+)
+  .trim()
+  .toLowerCase();
 
 /**
  * Admin access:
  * - The owner must have a Google ID and admin role.
  * - Other admin accounts require an explicitly assigned admin role.
  */
-export function isUserAdmin(user: StoredUser | null | undefined): boolean {
+export function isUserAdmin(
+  user: StoredUser | null | undefined
+): boolean {
   if (!user) return false;
 
   if (user.email?.trim().toLowerCase() === OWNER_EMAIL) {
@@ -118,8 +153,19 @@ if (ownerUser) {
   writeJsonFile(USERS_FILE, users);
 }
 
-function hashPassword(password: string, salt: string): string {
-  return crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512').toString('hex');
+function hashPassword(
+  password: string,
+  salt: string
+): string {
+  return crypto
+    .pbkdf2Sync(
+      password,
+      salt,
+      1000,
+      64,
+      'sha512'
+    )
+    .toString('hex');
 }
 
 export function getTodayString(): string {
@@ -139,15 +185,29 @@ export function registerUser(
 
   // The owner account must use verified Google authentication.
   if (normalizedEmail === OWNER_EMAIL) {
-    throw new Error('Owner account must sign in with Google.');
+    throw new Error(
+      'Owner account must sign in with Google.'
+    );
   }
 
-  if (users.some((u) => u.email.toLowerCase() === normalizedEmail)) {
-    throw new Error('An account with this email address already exists. Please sign in.');
+  if (
+    users.some(
+      (u) => u.email.toLowerCase() === normalizedEmail
+    )
+  ) {
+    throw new Error(
+      'An account with this email address already exists. Please sign in.'
+    );
   }
 
-  const salt = crypto.randomBytes(16).toString('hex');
-  const passwordHash = hashPassword(password, salt);
+  const salt = crypto
+    .randomBytes(16)
+    .toString('hex');
+
+  const passwordHash = hashPassword(
+    password,
+    salt
+  );
 
   const newUser: StoredUser = {
     id: `user_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
@@ -162,22 +222,39 @@ export function registerUser(
   };
 
   users.push(newUser);
-  writeJsonFile(USERS_FILE, users);
 
-  const token = createSession(newUser.id);
-  return { user: newUser, token };
+  writeJsonFile(
+    USERS_FILE,
+    users
+  );
+
+  const token = createSession(
+    newUser.id
+  );
+
+  return {
+    user: newUser,
+    token,
+  };
 }
 
 export function authenticateUser(
   email: string,
   password: string
 ): { user: StoredUser; token: string } {
-  const normalizedEmail = email.trim().toLowerCase();
+  const normalizedEmail =
+    email.trim().toLowerCase();
 
-  const user = users.find((u) => u.email.toLowerCase() === normalizedEmail);
+  const user = users.find(
+    (u) =>
+      u.email.toLowerCase() ===
+      normalizedEmail
+  );
 
   if (!user) {
-    throw new Error('No account found with this email address.');
+    throw new Error(
+      'No account found with this email address.'
+    );
   }
 
   if (!user.passwordHash || !user.salt) {
@@ -186,123 +263,230 @@ export function authenticateUser(
     );
   }
 
-  const computedHash = hashPassword(password, user.salt);
+  const computedHash =
+    hashPassword(
+      password,
+      user.salt
+    );
 
-  if (computedHash !== user.passwordHash) {
-    throw new Error('Incorrect password. Please verify your credentials and try again.');
+  if (
+    computedHash !==
+    user.passwordHash
+  ) {
+    throw new Error(
+      'Incorrect password. Please verify your credentials and try again.'
+    );
   }
 
-  const token = createSession(user.id);
-  return { user, token };
+  const token =
+    createSession(user.id);
+
+  return {
+    user,
+    token,
+  };
 }
 
-export function findOrCreateGoogleUser(profile: {
-  googleId: string;
-  email: string;
-  name: string;
-  avatarUrl?: string;
-}): { user: StoredUser; token: string } {
-  const normalizedEmail = profile.email.trim().toLowerCase();
+export function findOrCreateGoogleUser(
+  profile: {
+    googleId: string;
+    email: string;
+    name: string;
+    avatarUrl?: string;
+  }
+): { user: StoredUser; token: string } {
+  const normalizedEmail =
+    profile.email.trim().toLowerCase();
 
-  let user = users.find((u) => u.email.toLowerCase() === normalizedEmail);
+  let user = users.find(
+    (u) =>
+      u.email.toLowerCase() ===
+      normalizedEmail
+  );
 
   if (user) {
-    user.googleId = profile.googleId;
+    user.googleId =
+      profile.googleId;
 
-    if (normalizedEmail === OWNER_EMAIL) {
+    if (
+      normalizedEmail ===
+      OWNER_EMAIL
+    ) {
       user.role = 'admin';
     }
 
     if (profile.avatarUrl) {
-      user.avatarUrl = profile.avatarUrl;
+      user.avatarUrl =
+        profile.avatarUrl;
     }
 
-    if (!user.name || user.name === 'User') {
-      user.name = profile.name;
+    if (
+      !user.name ||
+      user.name === 'User'
+    ) {
+      user.name =
+        profile.name;
     }
 
     if (!user.authProvider) {
-      user.authProvider = 'google';
+      user.authProvider =
+        'google';
     }
 
-    writeJsonFile(USERS_FILE, users);
+    writeJsonFile(
+      USERS_FILE,
+      users
+    );
   } else {
     user = {
       id: `user_g_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
-      name: profile.name.trim() || 'Google User',
-      email: normalizedEmail,
-      googleId: profile.googleId,
-      avatarUrl: profile.avatarUrl,
-      authProvider: 'google',
+      name:
+        profile.name.trim() ||
+        'Google User',
+      email:
+        normalizedEmail,
+      googleId:
+        profile.googleId,
+      avatarUrl:
+        profile.avatarUrl,
+      authProvider:
+        'google',
       plan: 'free',
-      role: normalizedEmail === OWNER_EMAIL ? 'admin' : 'user',
-      createdAt: Date.now(),
-      preferredLanguage: 'English',
+      role:
+        normalizedEmail ===
+        OWNER_EMAIL
+          ? 'admin'
+          : 'user',
+      createdAt:
+        Date.now(),
+      preferredLanguage:
+        'English',
     };
 
     users.push(user);
-    writeJsonFile(USERS_FILE, users);
+
+    writeJsonFile(
+      USERS_FILE,
+      users
+    );
   }
 
-  const token = createSession(user.id);
-  return { user, token };
+  const token =
+    createSession(user.id);
+
+  return {
+    user,
+    token,
+  };
 }
 
-export function createSession(userId: string): string {
-  const token = crypto.randomBytes(32).toString('hex');
+export function createSession(
+  userId: string
+): string {
+  const token =
+    crypto.randomBytes(32).toString('hex');
 
-  const newSession: StoredSession = {
+  const newSession:
+    StoredSession = {
     token,
     userId,
-    createdAt: Date.now(),
-    expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
+    createdAt:
+      Date.now(),
+    expiresAt:
+      Date.now() +
+      30 * 24 * 60 * 60 * 1000,
   };
 
-  sessions = sessions.filter(
-    (s) => s.userId !== userId || s.expiresAt > Date.now()
+  sessions =
+    sessions.filter(
+      (s) =>
+        s.userId !== userId ||
+        s.expiresAt > Date.now()
+    );
+
+  sessions.push(
+    newSession
   );
 
-  sessions.push(newSession);
-  writeJsonFile(SESSIONS_FILE, sessions);
+  writeJsonFile(
+    SESSIONS_FILE,
+    sessions
+  );
 
   return token;
 }
 
-export function getUserByToken(token: string): StoredUser | null {
+export function getUserByToken(
+  token: string
+): StoredUser | null {
   if (!token) return null;
 
-  const session = sessions.find(
-    (s) => s.token === token && s.expiresAt > Date.now()
+  const session =
+    sessions.find(
+      (s) =>
+        s.token === token &&
+        s.expiresAt > Date.now()
+    );
+
+  if (!session) {
+    return null;
+  }
+
+  return (
+    users.find(
+      (u) =>
+        u.id === session.userId
+    ) || null
   );
-
-  if (!session) return null;
-
-  return users.find((u) => u.id === session.userId) || null;
 }
 
-export function getUserById(userId: string): StoredUser | null {
-  return users.find((u) => u.id === userId) || null;
+export function getUserById(
+  userId: string
+): StoredUser | null {
+  return (
+    users.find(
+      (u) => u.id === userId
+    ) || null
+  );
 }
 
 export function updateUserProfile(
   userId: string,
-  updates: { name?: string; preferredLanguage?: string }
+  updates: {
+    name?: string;
+    preferredLanguage?: string;
+  }
 ): StoredUser {
-  const user = users.find((u) => u.id === userId);
+  const user =
+    users.find(
+      (u) => u.id === userId
+    );
 
   if (!user) {
-    throw new Error('User not found');
+    throw new Error(
+      'User not found'
+    );
   }
 
-  if (updates.name !== undefined) {
-    user.name = updates.name.trim();
+  if (
+    updates.name !== undefined
+  ) {
+    user.name =
+      updates.name.trim();
   }
 
-  if (updates.preferredLanguage !== undefined) {
-    user.preferredLanguage = updates.preferredLanguage;
+  if (
+    updates.preferredLanguage !== undefined
+  ) {
+    user.preferredLanguage =
+      updates.preferredLanguage;
   }
 
-  writeJsonFile(USERS_FILE, users);
+  writeJsonFile(
+    USERS_FILE,
+    users
+  );
+
   return user;
 }
 
@@ -311,63 +495,135 @@ export function updateUserPlan(
   plan: 'free' | 'pro',
   proUntil?: number
 ): StoredUser {
-  const user = users.find((u) => u.id === userId);
+  const user =
+    users.find(
+      (u) => u.id === userId
+    );
 
   if (!user) {
-    throw new Error('User not found');
+    throw new Error(
+      'User not found'
+    );
   }
 
   user.plan = plan;
+
   user.proUntil =
     plan === 'pro'
-      ? proUntil || Date.now() + 365 * 86400000
+      ? proUntil ||
+        Date.now() +
+          365 * 86400000
       : undefined;
 
-  writeJsonFile(USERS_FILE, users);
+  writeJsonFile(
+    USERS_FILE,
+    users
+  );
+
   return user;
 }
 
 export function getAllUsers(): Array<
-  Omit<StoredUser, 'passwordHash' | 'salt'> & { isAdmin: boolean }
+  Omit<
+    StoredUser,
+    'passwordHash' | 'salt'
+  > & {
+    isAdmin: boolean;
+  }
 > {
-  return users.map((u) => ({
-    id: u.id,
-    name: u.name,
-    email: u.email,
-    avatarUrl: u.avatarUrl,
-    authProvider: u.authProvider,
-    plan: u.plan,
-    role: isUserAdmin(u) ? 'admin' : 'user',
-    isAdmin: isUserAdmin(u),
-    proUntil: u.proUntil,
-    createdAt: u.createdAt,
-    preferredLanguage: u.preferredLanguage,
-  }));
+  return users.map(
+    (u) => ({
+      id: u.id,
+      name: u.name,
+      email: u.email,
+      avatarUrl:
+        u.avatarUrl,
+      authProvider:
+        u.authProvider,
+      plan: u.plan,
+      role: isUserAdmin(u)
+        ? 'admin'
+        : 'user',
+      isAdmin:
+        isUserAdmin(u),
+      proUntil:
+        u.proUntil,
+      createdAt:
+        u.createdAt,
+      preferredLanguage:
+        u.preferredLanguage,
+    })
+  );
 }
 
-export function invalidateSession(token: string): void {
-  sessions = sessions.filter((s) => s.token !== token);
-  writeJsonFile(SESSIONS_FILE, sessions);
+export function invalidateSession(
+  token: string
+): void {
+  sessions =
+    sessions.filter(
+      (s) =>
+        s.token !== token
+    );
+
+  writeJsonFile(
+    SESSIONS_FILE,
+    sessions
+  );
 }
 
-export function deleteUserAccount(userId: string): void {
-  users = users.filter((u) => u.id !== userId);
-  sessions = sessions.filter((s) => s.userId !== userId);
-  documents = documents.filter((d) => d.userId !== userId);
+export function deleteUserAccount(
+  userId: string
+): void {
+  users =
+    users.filter(
+      (u) => u.id !== userId
+    );
 
-  writeJsonFile(USERS_FILE, users);
-  writeJsonFile(SESSIONS_FILE, sessions);
-  writeJsonFile(DOCUMENTS_FILE, documents);
+  sessions =
+    sessions.filter(
+      (s) =>
+        s.userId !== userId
+    );
+
+  documents =
+    documents.filter(
+      (d) =>
+        d.userId !== userId
+    );
+
+  writeJsonFile(
+    USERS_FILE,
+    users
+  );
+
+  writeJsonFile(
+    SESSIONS_FILE,
+    sessions
+  );
+
+  writeJsonFile(
+    DOCUMENTS_FILE,
+    documents
+  );
 }
 
 // -------------------------------------------------------------
 // DOCUMENT STORAGE & SYNC
 // -------------------------------------------------------------
 
-export function getUserDocuments(userId: string): StoredDocument[] {
+export function getUserDocuments(
+  userId: string
+): StoredDocument[] {
   return documents
-    .filter((d) => d.userId === userId)
-    .sort((a, b) => b.timestamp - a.timestamp);
+    .filter(
+      (d) =>
+        d.userId === userId
+    )
+    .sort(
+      (a, b) =>
+        b.timestamp -
+        a.timestamp
+    );
 }
 
 export function saveUserDocument(
@@ -384,35 +640,65 @@ export function saveUserDocument(
   }
 ): StoredDocument {
   const docId =
-    doc.id || `doc_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+    doc.id ||
+    `doc_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
 
-  const existingIdx = documents.findIndex(
-    (d) => d.userId === userId && d.id === docId
-  );
+  const existingIdx =
+    documents.findIndex(
+      (d) =>
+        d.userId ===
+          userId &&
+        d.id === docId
+    );
 
   const snippet =
     doc.snippet ||
-    doc.fullContent.replace(/\n+/g, ' ').slice(0, 120) + '...';
+    doc.fullContent.replace(
+      /\n+/g,
+      ' '
+    ).slice(0, 120) +
+      '...';
 
-  const newDoc: StoredDocument = {
+  const newDoc:
+    StoredDocument = {
     id: docId,
     userId,
-    title: doc.title || 'Untitled Document',
-    type: doc.type || 'home',
+    title:
+      doc.title ||
+      'Untitled Document',
+    type:
+      doc.type ||
+      'home',
     snippet,
-    fullContent: doc.fullContent,
-    timestamp: doc.timestamp || Date.now(),
-    isFavorite: Boolean(doc.isFavorite),
-    category: doc.category || 'General',
+    fullContent:
+      doc.fullContent,
+    timestamp:
+      doc.timestamp ||
+      Date.now(),
+    isFavorite:
+      Boolean(
+        doc.isFavorite
+      ),
+    category:
+      doc.category ||
+      'General',
   };
 
   if (existingIdx >= 0) {
-    documents[existingIdx] = newDoc;
+    documents[
+      existingIdx
+    ] = newDoc;
   } else {
-    documents.unshift(newDoc);
+    documents.unshift(
+      newDoc
+    );
   }
 
-  writeJsonFile(DOCUMENTS_FILE, documents);
+  writeJsonFile(
+    DOCUMENTS_FILE,
+    documents
+  );
+
   return newDoc;
 }
 
@@ -425,41 +711,85 @@ export function updateUserDocument(
     category?: string;
   }
 ): StoredDocument {
-  const doc = documents.find(
-    (d) => d.userId === userId && d.id === docId
-  );
+  const doc =
+    documents.find(
+      (d) =>
+        d.userId ===
+          userId &&
+        d.id === docId
+    );
 
   if (!doc) {
-    throw new Error('Document not found');
+    throw new Error(
+      'Document not found'
+    );
   }
 
-  if (updates.title !== undefined) {
-    doc.title = updates.title.trim();
+  if (
+    updates.title !==
+    undefined
+  ) {
+    doc.title =
+      updates.title.trim();
   }
 
-  if (updates.isFavorite !== undefined) {
-    doc.isFavorite = updates.isFavorite;
+  if (
+    updates.isFavorite !==
+    undefined
+  ) {
+    doc.isFavorite =
+      updates.isFavorite;
   }
 
-  if (updates.category !== undefined) {
-    doc.category = updates.category;
+  if (
+    updates.category !==
+    undefined
+  ) {
+    doc.category =
+      updates.category;
   }
 
-  writeJsonFile(DOCUMENTS_FILE, documents);
+  writeJsonFile(
+    DOCUMENTS_FILE,
+    documents
+  );
+
   return doc;
 }
 
-export function deleteUserDocument(userId: string, docId: string): void {
-  documents = documents.filter(
-    (d) => !(d.userId === userId && d.id === docId)
-  );
+export function deleteUserDocument(
+  userId: string,
+  docId: string
+): void {
+  documents =
+    documents.filter(
+      (d) =>
+        !(
+          d.userId ===
+            userId &&
+          d.id === docId
+        )
+    );
 
-  writeJsonFile(DOCUMENTS_FILE, documents);
+  writeJsonFile(
+    DOCUMENTS_FILE,
+    documents
+  );
 }
 
-export function clearUserDocuments(userId: string): void {
-  documents = documents.filter((d) => d.userId !== userId);
-  writeJsonFile(DOCUMENTS_FILE, documents);
+export function clearUserDocuments(
+  userId: string
+): void {
+  documents =
+    documents.filter(
+      (d) =>
+        d.userId !== userId
+    );
+
+  writeJsonFile(
+    DOCUMENTS_FILE,
+    documents
+  );
 }
 
 export function syncUserDocuments(
@@ -475,12 +805,21 @@ export function syncUserDocuments(
     category?: string;
   }>
 ): StoredDocument[] {
-  for (const clientDoc of clientDocs) {
-    const existing = documents.find(
-      (d) =>
-        d.userId === userId &&
-        (d.id === clientDoc.id || d.fullContent === clientDoc.fullContent)
-    );
+  for (
+    const clientDoc of clientDocs
+  ) {
+    const existing =
+      documents.find(
+        (d) =>
+          d.userId ===
+            userId &&
+          (
+            d.id ===
+              clientDoc.id ||
+            d.fullContent ===
+              clientDoc.fullContent
+          )
+      );
 
     if (!existing) {
       documents.unshift({
@@ -488,54 +827,105 @@ export function syncUserDocuments(
           clientDoc.id ||
           `doc_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
         userId,
-        title: clientDoc.title || 'Saved Document',
-        type: clientDoc.type || 'home',
+        title:
+          clientDoc.title ||
+          'Saved Document',
+        type:
+          clientDoc.type ||
+          'home',
         snippet:
           clientDoc.snippet ||
-          clientDoc.fullContent.slice(0, 100),
-        fullContent: clientDoc.fullContent,
-        timestamp: clientDoc.timestamp || Date.now(),
-        isFavorite: Boolean(clientDoc.isFavorite),
-        category: clientDoc.category || 'General',
+          clientDoc.fullContent.slice(
+            0,
+            100
+          ),
+        fullContent:
+          clientDoc.fullContent,
+        timestamp:
+          clientDoc.timestamp ||
+          Date.now(),
+        isFavorite:
+          Boolean(
+            clientDoc.isFavorite
+          ),
+        category:
+          clientDoc.category ||
+          'General',
       });
     }
   }
 
-  writeJsonFile(DOCUMENTS_FILE, documents);
-  return getUserDocuments(userId);
+  writeJsonFile(
+    DOCUMENTS_FILE,
+    documents
+  );
+
+  return getUserDocuments(
+    userId
+  );
 }
 
 // -------------------------------------------------------------
 // SERVER-SIDE RATE LIMITING & USAGE MANAGEMENT
 // -------------------------------------------------------------
 
-const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const RATE_LIMIT_WINDOW_MS =
+  60 * 1000;
 
-const ipRequestCounts = new Map<
-  string,
-  { count: number; resetAt: number }
->();
+const ipRequestCounts =
+  new Map<
+    string,
+    {
+      count: number;
+      resetAt: number;
+    }
+  >();
 
 export function checkRateLimit(
   ip: string,
   maxRequestsPerMinute = 60
-): { allowed: boolean; retryAfter?: number } {
-  const now = Date.now();
-  const record = ipRequestCounts.get(ip);
+): {
+  allowed: boolean;
+  retryAfter?: number;
+} {
+  const now =
+    Date.now();
 
-  if (!record || now > record.resetAt) {
-    ipRequestCounts.set(ip, {
-      count: 1,
-      resetAt: now + RATE_LIMIT_WINDOW_MS,
-    });
+  const record =
+    ipRequestCounts.get(
+      ip
+    );
 
-    return { allowed: true };
+  if (
+    !record ||
+    now > record.resetAt
+  ) {
+    ipRequestCounts.set(
+      ip,
+      {
+        count: 1,
+        resetAt:
+          now +
+          RATE_LIMIT_WINDOW_MS,
+      }
+    );
+
+    return {
+      allowed: true,
+    };
   }
 
-  if (record.count >= maxRequestsPerMinute) {
-    const retryAfter = Math.ceil(
-      (record.resetAt - now) / 1000
-    );
+  if (
+    record.count >=
+    maxRequestsPerMinute
+  ) {
+    const retryAfter =
+      Math.ceil(
+        (
+          record.resetAt -
+          now
+        ) / 1000
+      );
 
     return {
       allowed: false,
@@ -545,7 +935,9 @@ export function checkRateLimit(
 
   record.count += 1;
 
-  return { allowed: true };
+  return {
+    allowed: true,
+  };
 }
 
 export function getDailyUsage(
@@ -556,14 +948,23 @@ export function getDailyUsage(
   dailyLimit: number;
   dateString: string;
 } {
-  const today = getTodayString();
-  const key = `${identifier}_${today}`;
-  const dailyUsed = usageMap[key] || 0;
+  const today =
+    getTodayString();
+
+  const key =
+    `${identifier}_${today}`;
+
+  const dailyUsed =
+    usageMap[key] || 0;
 
   return {
     dailyUsed,
-    dailyLimit: isPro ? 999999 : 5,
-    dateString: today,
+    dailyLimit:
+      isPro
+        ? 999999
+        : 5,
+    dateString:
+      today,
   };
 }
 
@@ -575,19 +976,37 @@ export function canPerformAiAction(
     return true;
   }
 
-  const usage = getDailyUsage(identifier, isPro);
+  const usage =
+    getDailyUsage(
+      identifier,
+      isPro
+    );
 
-  return usage.dailyUsed < 5;
+  return (
+    usage.dailyUsed <
+    5
+  );
 }
 
-export function incrementDailyUsage(identifier: string): number {
-  const today = getTodayString();
-  const key = `${identifier}_${today}`;
-  const current = usageMap[key] || 0;
+export function incrementDailyUsage(
+  identifier: string
+): number {
+  const today =
+    getTodayString();
 
-  usageMap[key] = current + 1;
+  const key =
+    `${identifier}_${today}`;
 
-  writeJsonFile(USAGE_FILE, usageMap);
+  const current =
+    usageMap[key] || 0;
+
+  usageMap[key] =
+    current + 1;
+
+  writeJsonFile(
+    USAGE_FILE,
+    usageMap
+  );
 
   return usageMap[key];
 }
@@ -597,13 +1016,22 @@ export function incrementDailyUsage(identifier: string): number {
 // -------------------------------------------------------------
 
 export const GOOGLE_PLAY_SKUS = {
-  MONTHLY: 'ai_doc_pro_monthly',
-  ANNUAL: 'ai_doc_pro_annual',
-  LIFETIME: 'ai_doc_pro_lifetime',
+  MONTHLY:
+    'ai_doc_pro_monthly',
+  ANNUAL:
+    'ai_doc_pro_annual',
+  LIFETIME:
+    'ai_doc_pro_lifetime',
 } as const;
 
-export function isValidGooglePlaySku(sku: string): boolean {
-  return Object.values(GOOGLE_PLAY_SKUS).includes(sku as any);
+export function isValidGooglePlaySku(
+  sku: string
+): boolean {
+  return Object.values(
+    GOOGLE_PLAY_SKUS
+  ).includes(
+    sku as (typeof GOOGLE_PLAY_SKUS)[keyof typeof GOOGLE_PLAY_SKUS]
+  );
 }
 
 export function findGooglePlayPurchaseByToken(
@@ -614,35 +1042,51 @@ export function findGooglePlayPurchaseByToken(
   }
 
   return (
-    purchases.find((p) => p.purchaseToken === purchaseToken) ||
-    null
+    purchases.find(
+      (p) =>
+        p.purchaseToken ===
+        purchaseToken
+    ) || null
   );
 }
 
 export function getUserGooglePlayPurchases(
   userId: string
 ): GooglePlayPurchaseRecord[] {
-  return purchases.filter((p) => p.userId === userId);
+  return purchases.filter(
+    (p) =>
+      p.userId === userId
+  );
 }
 
-export function getAllGooglePlayPurchases(): GooglePlayPurchaseRecord[] {
+export function getAllGooglePlayPurchases():
+  GooglePlayPurchaseRecord[] {
   return [...purchases];
 }
 
 export function recordGooglePlayPurchase(
   record: GooglePlayPurchaseRecord
 ): GooglePlayPurchaseRecord {
-  const idx = purchases.findIndex(
-    (p) => p.purchaseToken === record.purchaseToken
-  );
+  const idx =
+    purchases.findIndex(
+      (p) =>
+        p.purchaseToken ===
+        record.purchaseToken
+    );
 
   if (idx >= 0) {
-    purchases[idx] = record;
+    purchases[idx] =
+      record;
   } else {
-    purchases.unshift(record);
+    purchases.unshift(
+      record
+    );
   }
 
-  writeJsonFile(PURCHASES_FILE, purchases);
+  writeJsonFile(
+    PURCHASES_FILE,
+    purchases
+  );
 
   return record;
 }
