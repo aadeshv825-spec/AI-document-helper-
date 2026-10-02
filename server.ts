@@ -2319,14 +2319,27 @@ app.post(
           .randomBytes(3)
           .toString('hex')
           .toUpperCase()}`;
+// Acknowledge the subscription only after Google Play verification.
+if (
+  subscription.acknowledgementState ===
+  'ACKNOWLEDGEMENT_STATE_PENDING'
+) {
+  await publisher.purchases.subscriptions.acknowledge({
+    packageName: expectedPackageName,
+    subscriptionId: verifiedSku,
+    token,
+    requestBody: {},
+  });
+}
 
-      // Activate Pro only AFTER Google confirms the purchase.
-      const updated =
-        updateUserPlan(
-          user.id,
-          'pro',
-          expiryTime
-        );
+// Activate Pro only after successful verification and acknowledgement.
+const updated =
+  updateUserPlan(
+    user.id,
+    'pro',
+    expiryTime
+  );
+      
 
       const purchaseRecord:
         GooglePlayPurchaseRecord =
