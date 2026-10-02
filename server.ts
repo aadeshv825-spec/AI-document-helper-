@@ -94,11 +94,40 @@ app.use('/api/', (req, res, next) => {
 });
 
 // Helper for extracting authenticated user & rate limiting identifier
+function isProActive(user: StoredUser | null): boolean {
+  if (!user || user.plan !== 'pro') return false;
+
+  // No expiry date means the Pro plan remains active.
+  if (!user.proUntil) return true;
+
+  const expiryTime =
+    typeof user.proUntil === 'number'
+      ? user.proUntil
+      : new Date(user.proUntil).getTime();
+
+  return Number.isFinite(expiryTime) && expiryTime > Date.now();
+}
+
 function getAuthContext(req: express.Request): {
   user: StoredUser | null;
   identifier: string;
   isPro: boolean;
 } {
+  const token = getTokenFromRequest(req);
+  const user = token ? getUserByToken(token) : null;
+
+  const identifier = user
+    ? `user:${user.id}`
+    : `ip:${req.ip || req.socket.remoteAddress || 'unknown'}`;
+
+  const isPro = isProActive(user);
+
+  return {
+    user,
+    identifier,
+    isPro,
+  };
+}
   const authHeader = req.headers.authorization;
 
   const token =
