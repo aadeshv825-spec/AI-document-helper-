@@ -8,6 +8,7 @@ export interface StoredUser {
   email: string;
   passwordHash?: string;
   salt?: string;
+  passwordHashIterations?: number;
   googleId?: string;
   avatarUrl?: string;
   authProvider?: 'password' | 'google';
@@ -153,19 +154,50 @@ if (ownerUser) {
   writeJsonFile(USERS_FILE, users);
 }
 
+const PASSWORD_HASH_ITERATIONS = 310000;
+const LEGACY_PASSWORD_HASH_ITERATIONS = 1000;
+const PASSWORD_HASH_KEY_LENGTH = 64;
+const PASSWORD_HASH_DIGEST = 'sha512';
+
 function hashPassword(
   password: string,
-  salt: string
+  salt: string,
+  iterations: number = PASSWORD_HASH_ITERATIONS
 ): string {
   return crypto
     .pbkdf2Sync(
       password,
       salt,
-      1000,
-      64,
-      'sha512'
+      iterations,
+      PASSWORD_HASH_KEY_LENGTH,
+      PASSWORD_HASH_DIGEST
     )
     .toString('hex');
+}
+
+function isPasswordHashMatch(
+  computedHash: string,
+  storedHash: string
+): boolean {
+  const computedBuffer =
+    Buffer.from(computedHash, 'hex');
+
+  const storedBuffer =
+    Buffer.from(storedHash, 'hex');
+
+  if (
+    computedBuffer.length !==
+      PASSWORD_HASH_KEY_LENGTH ||
+    storedBuffer.length !==
+      computedBuffer.length
+  ) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(
+    computedBuffer,
+    storedBuffer
+  );
 }
 
 export function getTodayString(): string {
@@ -206,7 +238,8 @@ export function registerUser(
 
   const passwordHash = hashPassword(
     password,
-    salt
+    salt,
+    PASSWORD_HASH_ITERATIONS
   );
 
   const newUser: StoredUser = {
@@ -215,6 +248,8 @@ export function registerUser(
     email: normalizedEmail,
     passwordHash,
     salt,
+    passwordHashIterations:
+      PASSWORD_HASH_ITERATIONS,
     plan: 'free',
     role: 'user',
     createdAt: Date.now(),
@@ -263,18 +298,53 @@ export function authenticateUser(
     );
   }
 
+  // Users without a stored iteration count have legacy 1,000-iteration hashes.
+  const storedIterations =
+    user.passwordHashIterations ||
+    LEGACY_PASSWORD_HASH_ITERATIONS;
+
   const computedHash =
     hashPassword(
       password,
-      user.salt
+      user.salt,
+      storedIterations
     );
 
   if (
-    computedHash !==
-    user.passwordHash
+    !isPasswordHashMatch(
+      computedHash,
+      user.passwordHash
+    )
   ) {
     throw new Error(
       'Incorrect password. Please verify your credentials and try again.'
+    );
+  }
+
+  // Transparently upgrade legacy hashes after a successful login.
+  if (
+    storedIterations <
+    PASSWORD_HASH_ITERATIONS
+  ) {
+    const newSalt = crypto
+      .randomBytes(16)
+      .toString('hex');
+
+    user.passwordHash =
+      hashPassword(
+        password,
+        newSalt,
+        PASSWORD_HASH_ITERATIONS
+      );
+
+    user.salt = newSalt;
+
+    user.passwordHashIterations =
+      PASSWORD_HASH_ITERATIONS;
+
+    writeJsonFile(
+      USERS_FILE,
+      users
     );
   }
 
