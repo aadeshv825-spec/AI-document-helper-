@@ -15,7 +15,7 @@ declare global {
 
     AndroidGoogleSignIn?: {
       isGoogleSignInSupported?: () => boolean;
-      launchGoogleSignIn?: (webClientId?: string) => void;
+      launchGoogleSignIn?: (webClientId?: string, nonce?: string) => void;
     };
 
     onAndroidBackPressed?: () => boolean;
@@ -54,7 +54,8 @@ export function isNativeGoogleSignInAvailable(): boolean {
  * Starts native Android Google Sign-In.
  */
 export function launchNativeGoogleSignIn(
-  clientId?: string
+  clientId?: string,
+  nonce?: string
 ): boolean {
   if (typeof window === 'undefined') return false;
 
@@ -67,7 +68,7 @@ export function launchNativeGoogleSignIn(
 
     cancelNativeGoogleSignInTimeout();
 
-    bridge.launchGoogleSignIn(clientId);
+    bridge.launchGoogleSignIn(clientId, nonce);
 
     nativeGoogleSignInTimeout = window.setTimeout(() => {
       nativeGoogleSignInTimeout = undefined;

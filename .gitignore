@@ -46,3 +46,6 @@ android-project.tar.gz
 # Local data and backups
 data/
 *.corrupt-*
+
+# Generated Android web assets (built by scripts/prepare-android-assets.mjs)
+android/app/src/main/assets/public/

@@ -49,15 +49,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- App Links / Deep Links -->
-            <intent-filter android:autoVerify="true">
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data
-                    android:scheme="https"
-                    android:host="ais-dev-gq2p2ijj6ei7rg6rotit6q-119321813297.asia-southeast1.run.app" />
-            </intent-filter>
+            <!--
+              App Links were removed: they pointed at a development host and
+              the app does not handle incoming links. To add them back, use
+              the real production domain and publish a verified
+              /.well-known/assetlinks.json (see docs/PRODUCTION_SETUP.md).
+            -->
         </activity>
 
         <!-- FileProvider for secure camera capture & PDF export sharing -->

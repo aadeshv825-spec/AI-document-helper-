@@ -23,6 +23,8 @@ import {
   getDailyUsage,
   canPerformAiAction,
   incrementDailyUsage,
+  reserveDailyUsage,
+  releaseDailyUsage,
   invalidateSession,
   getAllUsers,
   isUserAdmin,
@@ -39,10 +41,20 @@ import {
   PASSWORD_MIN_LENGTH,
   PASSWORD_MAX_LENGTH,
   findUserByEmail,
+  getUserById,
+  getWriteMark,
+  confirmPersisted,
+  getStorageStatus,
+  checkDatabaseConnection,
   setUserPassword,
   verifyUserPassword,
   createSession,
 } from './server/store.ts';
+import {
+  issueGoogleSignInNonce,
+  verifyGoogleIdTokenForSignIn,
+  verifyPubSubPushToken,
+} from './server/googleIdToken.ts';
 
 dotenv.config();
 
@@ -168,6 +180,12 @@ app.use('/api/', (req, res, next) => {
 
 // Global API rate limiting middleware for abuse prevention
 app.use('/api/', (req, res, next) => {
+  // Google Pub/Sub pushes are authenticated by a signed token and
+  // must not be dropped because they share Google's IP ranges.
+  if (req.originalUrl.startsWith('/api/billing/google-play/rtdn')) {
+    return next();
+  }
+
   const ip = getClientIp(req);
 
   const { allowed, retryAfter } = checkRateLimit(ip, 120);
@@ -178,6 +196,59 @@ app.use('/api/', (req, res, next) => {
       retryAfter,
     });
   }
+
+  next();
+});
+
+// Never report success for a change that did not reach permanent
+// storage. For every state-changing API request, a successful JSON
+// response is held until the database confirms all writes queued by
+// the request; if it cannot (outage or failed write) the client gets
+// a 503 instead of a false success.
+app.use('/api/', (req, res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') {
+    return next();
+  }
+
+  const mark = getWriteMark();
+  const originalJson = res.json.bind(res);
+
+  res.json = ((body?: any) => {
+    if (res.statusCode >= 400 || getWriteMark() === mark) {
+      return originalJson(body);
+    }
+
+    confirmPersisted(mark)
+      .then((ok) => {
+        if (res.headersSent) return;
+
+        if (ok) {
+          originalJson(body);
+          return;
+        }
+
+        console.error(
+          `[Store] Could not confirm database write for ${req.method} ${req.path}`
+        );
+
+        res.status(503);
+        originalJson({
+          error:
+            'Your change could not be saved right now. Please check your connection and try again in a moment.',
+          persistenceFailed: true,
+        });
+      })
+      .catch(() => {
+        if (res.headersSent) return;
+        res.status(503);
+        originalJson({
+          error: 'Your change could not be saved right now. Please try again.',
+          persistenceFailed: true,
+        });
+      });
+
+    return res;
+  }) as typeof res.json;
 
   next();
 });
@@ -281,21 +352,40 @@ function checkAiUsage(
 } | null {
   const authCtx = getAuthContext(req);
 
-  if (!canPerformAiAction(authCtx.identifier, authCtx.isPro)) {
-    const currentUsage = getDailyUsage(
-      authCtx.identifier,
-      authCtx.isPro
-    );
+  // Check and reserve in one synchronous step so concurrent requests
+  // cannot exceed the free daily limit.
+  const reservation = reserveDailyUsage(
+    authCtx.identifier,
+    authCtx.isPro
+  );
 
+  if (!reservation.allowed) {
     res.status(429).json({
       error:
         'Daily free limit reached (5/5). Upgrade to Pro for unlimited AI actions, or try again tomorrow.',
       isLimitReached: true,
-      usage: currentUsage,
+      usage: reservation.usage,
     });
 
     return null;
   }
+
+  // Policy: only successful AI responses count. If the request fails
+  // (validation error, AI error, timeout or the client disconnects
+  // before a response is sent) the reserved action is returned.
+  let settled = false;
+
+  const settle = () => {
+    if (settled) return;
+    settled = true;
+
+    if (!res.writableFinished || res.statusCode >= 400) {
+      releaseDailyUsage(reservation.key);
+    }
+  };
+
+  res.once('finish', settle);
+  res.once('close', settle);
 
   return authCtx;
 }
@@ -329,10 +419,24 @@ app.get('/api/health', (req, res) => {
     key && key !== 'MY_GEMINI_API_KEY'
   );
 
+  const storage = getStorageStatus();
+
   res.json({
-    status: 'ok',
+    status: storage.connected ? 'ok' : 'degraded',
     hasGeminiKey: isConfigured,
+    storage: {
+      backend: storage.backend,
+      connected: storage.connected,
+      pendingWrites: storage.pendingWrites,
+      failedWrites: storage.failedWrites,
+    },
   });
+});
+
+// Readiness probe: verifies the database answers right now.
+app.get('/api/health/ready', async (req, res) => {
+  const ok = await checkDatabaseConnection();
+  res.status(ok ? 200 : 503).json({ ready: ok });
 });
 
 // Helper for cleaning markdown JSON fences if Gemini wraps in ```json ...
@@ -664,7 +768,6 @@ Respond STRICTLY with valid JSON in this exact structure:
     );
 
     if (parsed) {
-      incrementDailyUsage(authCtx.identifier);
 
       const extractedText =
         parsed.extractedText !== undefined
@@ -698,7 +801,6 @@ Respond STRICTLY with valid JSON in this exact structure:
       });
     }
 
-    incrementDailyUsage(authCtx.identifier);
 
     return res.json({
       extractedText:
@@ -821,7 +923,6 @@ Output STRICTLY valid JSON with this exact schema:
       response.text || ''
     );
 
-    incrementDailyUsage(authCtx.identifier);
 
     if (parsed && parsed.summary) {
       // The app renders these as lists; never send a missing or non-array value.
@@ -932,7 +1033,6 @@ Return STRICTLY valid JSON:
       response.text || ''
     );
 
-    incrementDailyUsage(authCtx.identifier);
 
     const contextTruncated =
       documentContext.length > 40000;
@@ -1039,7 +1139,6 @@ Output STRICTLY valid JSON:
       response.text || ''
     );
 
-    incrementDailyUsage(authCtx.identifier);
 
     if (parsed && parsed.translatedText) {
       return res.json({
@@ -1147,7 +1246,6 @@ Return STRICTLY valid JSON:
       response.text || ''
     );
 
-    incrementDailyUsage(authCtx.identifier);
 
     if (parsed && parsed.content) {
       return res.json({
@@ -1301,7 +1399,6 @@ Return STRICTLY valid JSON:
       response.text || ''
     );
 
-    incrementDailyUsage(authCtx.identifier);
 
     if (parsed) {
       return res.json({
@@ -1685,14 +1782,20 @@ app.get('/api/auth/google/url', (req, res) => {
 // NATIVE GOOGLE SIGN-IN
 // =============================================================
 
+app.post('/api/auth/google/nonce', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ nonce: issueGoogleSignInNonce() });
+});
+
 app.post('/api/auth/google/native', async (req, res) => {
   try {
-    const { idToken } = req.body;
+    const { idToken } = req.body || {};
 
     if (
       !idToken ||
       typeof idToken !== 'string' ||
-      idToken.trim().length === 0
+      idToken.trim().length === 0 ||
+      idToken.length > 8192
     ) {
       return res.status(400).json({
         error:
@@ -1700,93 +1803,17 @@ app.post('/api/auth/google/native', async (req, res) => {
       });
     }
 
-    const verifyRes =
-      await fetch(
-        `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(
-          idToken.trim()
-        )}`
-      );
-
-    if (!verifyRes.ok) {
-      const errData =
-        await verifyRes
-          .json()
-          .catch(() => ({}));
-
-      console.error(
-        '[GoogleAuth] Cryptographic ID token verification failed:',
-        errData
-      );
-
-      return res.status(401).json({
-        error:
-          'Google ID token verification failed. The provided token is invalid, expired, or untrusted.',
-      });
-    }
-
-    const payload =
-      await verifyRes.json();
-
-    const validAudiences = [
+    const check = await verifyGoogleIdTokenForSignIn(idToken.trim(), [
       GOOGLE_WEB_CLIENT_ID,
       GOOGLE_ANDROID_CLIENT_ID,
-    ];
+    ]);
 
-    const tokenAud = payload.aud;
-
-    if (
-      !tokenAud ||
-      !validAudiences.includes(tokenAud)
-    ) {
-      console.error(
-        `[GoogleAuth] Audience mismatch. Expected one of: ${validAudiences.join(
-          ', '
-        )}, got: ${tokenAud}`
-      );
-
-      return res.status(401).json({
-        error:
-          'Google token audience mismatch. Token was not minted for this application.',
-      });
+    if (check.ok === false) {
+      const failure = check as Extract<typeof check, { ok: false }>;
+      return res.status(failure.status).json({ error: failure.error });
     }
 
-    const validIssuers = [
-      'accounts.google.com',
-      'https://accounts.google.com',
-    ];
-
-    if (
-      !payload.iss ||
-      !validIssuers.includes(payload.iss)
-    ) {
-      return res.status(401).json({
-        error:
-          'Google token issuer is untrusted.',
-      });
-    }
-
-    const nowSec =
-      Math.floor(Date.now() / 1000);
-
-    if (
-      payload.exp &&
-      Number(payload.exp) < nowSec
-    ) {
-      return res.status(401).json({
-        error:
-          'Google ID token has expired.',
-      });
-    }
-
-    if (
-      payload.email_verified !== 'true' &&
-      payload.email_verified !== true
-    ) {
-      return res.status(401).json({
-        error:
-          'Google account email is not verified.',
-      });
-    }
+    const payload = (check as Extract<typeof check, { ok: true }>).payload;
 
     const verifiedEmail =
       payload.email
@@ -1839,9 +1866,6 @@ app.post('/api/auth/google/native', async (req, res) => {
 
     const usage = getUserUsage(user);
 
-    console.log(
-      `[GoogleAuth] Cryptographically verified and authenticated Android user: ${user.email}`
-    );
 
     res.json({
       success: true,
@@ -1852,7 +1876,7 @@ app.post('/api/auth/google/native', async (req, res) => {
   } catch (err: any) {
     console.error(
       'Android Google auth error:',
-      err
+      err?.message || 'unknown error'
     );
 
     res.status(500).json({
@@ -3093,11 +3117,15 @@ function isGooglePlaySubscriptionActive(
     return false;
   }
 
+  // A cancelled subscription stays paid until its expiry time, so it
+  // keeps Pro access until then (Google Play policy).
   return (
     state ===
       'SUBSCRIPTION_STATE_ACTIVE' ||
     state ===
-      'SUBSCRIPTION_STATE_IN_GRACE_PERIOD'
+      'SUBSCRIPTION_STATE_IN_GRACE_PERIOD' ||
+    state ===
+      'SUBSCRIPTION_STATE_CANCELED'
   );
 }
 
@@ -3372,7 +3400,7 @@ app.post(
         getUserUsage(user);
 
       console.log(
-        `[Google Play Billing] Verified with Google Play API for ${user.email} (${user.id}), SKU: ${verifiedSku}, Order: ${verifiedOrderId}, Expiry: ${new Date(
+        `[Google Play Billing] Verified purchase for user ${user.id}, SKU: ${verifiedSku}, Expiry: ${new Date(
           expiryTime
         ).toISOString()}`
       );
@@ -3596,7 +3624,7 @@ async function verifyGooglePlaySubscriptionForUser(
 
     console.error(
       '[Google Play Billing] Restore token verification failed:',
-      verifyErr?.response?.data ||
+      verifyErr?.response?.status ||
         verifyErr?.message ||
         verifyErr
     );
@@ -3613,6 +3641,274 @@ async function verifyGooglePlaySubscriptionForUser(
     return { status: 'error' };
   }
 }
+
+// =============================================================
+// GOOGLE PLAY REAL-TIME DEVELOPER NOTIFICATIONS (RTDN)
+// =============================================================
+//
+// Google Play publishes subscription events to a Pub/Sub topic; an
+// authenticated push subscription delivers them here. A notification
+// is only a hint: the current state is always re-read from the Google
+// Play Developer API before access is granted or removed.
+
+const RTDN_PUSH_AUDIENCE = (process.env.RTDN_PUSH_AUDIENCE || '').trim();
+const RTDN_PUSH_SERVICE_ACCOUNT = (
+  process.env.RTDN_PUSH_SERVICE_ACCOUNT || ''
+).trim();
+
+// Pub/Sub may deliver a message more than once. Processing is
+// idempotent (it reconciles with Google's current state); this cache
+// just avoids repeated Google API calls for the same message.
+const processedRtdnMessages = new Map<string, number>();
+const RTDN_MESSAGE_CACHE_MS = 24 * 60 * 60 * 1000;
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, at] of processedRtdnMessages.entries()) {
+    if (now - at > RTDN_MESSAGE_CACHE_MS) processedRtdnMessages.delete(id);
+  }
+}, 60 * 60 * 1000).unref?.();
+
+/**
+ * Recomputes a user's Pro status from their verified Google Play
+ * purchases. Manually granted Pro without an expiry and admin accounts
+ * are never changed here.
+ */
+function reconcileGooglePlayEntitlement(userId: string): void {
+  const user = getUserById(userId);
+
+  if (!user || isUserAdmin(user)) return;
+
+  const now = Date.now();
+
+  const latestActiveExpiry = getUserGooglePlayPurchases(userId)
+    .filter(
+      (p) =>
+        p.state === 'VERIFIED' &&
+        typeof p.expiryTime === 'number' &&
+        p.expiryTime > now
+    )
+    .reduce((max, p) => Math.max(max, p.expiryTime || 0), 0);
+
+  if (latestActiveExpiry > 0) {
+    if (user.plan !== 'pro' || user.proUntil !== latestActiveExpiry) {
+      updateUserPlan(userId, 'pro', latestActiveExpiry);
+    }
+    return;
+  }
+
+  // Only remove Pro that came from Google Play (it has an expiry).
+  if (user.plan === 'pro' && user.proUntil != null) {
+    updateUserPlan(userId, 'free');
+  }
+}
+
+function markGooglePlayPurchase(
+  record: GooglePlayPurchaseRecord,
+  state: GooglePlayPurchaseRecord['state'],
+  googleState?: string
+): void {
+  recordGooglePlayPurchase({
+    ...record,
+    state,
+    ...(googleState ? { googleState } : {}),
+    verifiedAt: Date.now(),
+  });
+}
+
+type RtdnOutcome =
+  | 'granted'
+  | 'updated'
+  | 'revoked'
+  | 'ignored'
+  | 'unlinked';
+
+/**
+ * Re-reads a subscription from Google Play and applies it to the
+ * linked account. Throws on transient Google API errors so Pub/Sub
+ * retries the notification.
+ */
+async function syncGooglePlaySubscriptionFromGoogle(
+  purchaseToken: string
+): Promise<RtdnOutcome> {
+  const publisher = getGooglePlayPublisher();
+
+  let subscription: any;
+
+  try {
+    const response = await publisher.purchases.subscriptionsv2.get({
+      packageName: GOOGLE_PLAY_PACKAGE_NAME,
+      token: purchaseToken,
+    });
+    subscription = response.data;
+  } catch (err: any) {
+    const status = err?.response?.status || err?.code;
+
+    if (status === 400 || status === 404 || status === 410) {
+      const existing = findGooglePlayPurchaseByToken(purchaseToken);
+
+      if (existing) {
+        markGooglePlayPurchase(existing, 'EXPIRED');
+        reconcileGooglePlayEntitlement(existing.userId);
+        return 'revoked';
+      }
+
+      return 'ignored';
+    }
+
+    throw err;
+  }
+
+  const existing = findGooglePlayPurchaseByToken(purchaseToken);
+  const obfuscatedAccountId =
+    subscription?.externalAccountIdentifiers?.obfuscatedExternalAccountId;
+
+  // The purchase must belong to a known account: either already linked
+  // after app-side verification, or launched with the account id.
+  const userId = existing?.userId || obfuscatedAccountId;
+
+  if (!userId) return 'unlinked';
+
+  if (existing && obfuscatedAccountId && obfuscatedAccountId !== existing.userId) {
+    console.error('[RTDN] Purchase account mismatch; notification ignored.');
+    return 'ignored';
+  }
+
+  const user = getUserById(userId);
+
+  if (!user) return 'unlinked';
+
+  if (
+    isGooglePlaySubscriptionActive(subscription) &&
+    isGooglePlayAccountMatch(subscription, user)
+  ) {
+    // Verifies again, acknowledges if needed and stores the record.
+    const result = await verifyGooglePlaySubscriptionForUser(purchaseToken, user);
+
+    if (result.status === 'error') {
+      throw new Error('Google Play verification failed');
+    }
+
+    reconcileGooglePlayEntitlement(user.id);
+
+    return existing ? 'updated' : 'granted';
+  }
+
+  if (existing) {
+    const googleState = String(subscription?.subscriptionState || '');
+    const state =
+      googleState === 'SUBSCRIPTION_STATE_CANCELED' ? 'CANCELLED' : 'EXPIRED';
+
+    markGooglePlayPurchase(existing, state, googleState);
+    reconcileGooglePlayEntitlement(existing.userId);
+    return 'revoked';
+  }
+
+  return 'ignored';
+}
+
+/**
+ * Handles one decoded RTDN payload. Exported behaviour is covered by
+ * automated tests through the HTTP endpoint.
+ */
+async function handleRtdnPayload(notification: any): Promise<RtdnOutcome> {
+  if (!notification || typeof notification !== 'object') return 'ignored';
+
+  if (notification.packageName !== GOOGLE_PLAY_PACKAGE_NAME) {
+    return 'ignored';
+  }
+
+  if (notification.testNotification) {
+    console.log('[RTDN] Test notification received.');
+    return 'ignored';
+  }
+
+  const voided = notification.voidedPurchaseNotification;
+
+  if (voided && typeof voided.purchaseToken === 'string') {
+    // Refund or revocation: remove access for this purchase.
+    const existing = findGooglePlayPurchaseByToken(voided.purchaseToken);
+
+    if (!existing) return 'ignored';
+
+    markGooglePlayPurchase(existing, 'REVOKED');
+    reconcileGooglePlayEntitlement(existing.userId);
+    return 'revoked';
+  }
+
+  const sub = notification.subscriptionNotification;
+
+  if (sub && typeof sub.purchaseToken === 'string' && sub.purchaseToken.length <= 4096) {
+    if (sub.subscriptionId && !isValidGooglePlaySku(String(sub.subscriptionId))) {
+      return 'ignored';
+    }
+
+    return syncGooglePlaySubscriptionFromGoogle(sub.purchaseToken);
+  }
+
+  return 'ignored';
+}
+
+app.post('/api/billing/google-play/rtdn', async (req, res) => {
+  if (!RTDN_PUSH_AUDIENCE || !RTDN_PUSH_SERVICE_ACCOUNT) {
+    return res.status(503).json({
+      error: 'Real-time developer notifications are not configured.',
+    });
+  }
+
+  const authorized = await verifyPubSubPushToken(
+    req.headers.authorization,
+    {
+      audience: RTDN_PUSH_AUDIENCE,
+      serviceAccountEmail: RTDN_PUSH_SERVICE_ACCOUNT,
+    }
+  );
+
+  if (!authorized) {
+    return res.status(401).json({ error: 'Unauthorized.' });
+  }
+
+  const message = req.body?.message;
+  const messageId =
+    typeof message?.messageId === 'string' ? message.messageId : '';
+
+  if (!message || typeof message.data !== 'string') {
+    // Malformed: acknowledge so Pub/Sub does not retry forever.
+    return res.status(204).end();
+  }
+
+  if (messageId && processedRtdnMessages.has(messageId)) {
+    return res.status(204).end();
+  }
+
+  let notification: any;
+
+  try {
+    notification = JSON.parse(
+      Buffer.from(message.data, 'base64').toString('utf8')
+    );
+  } catch {
+    return res.status(204).end();
+  }
+
+  try {
+    const outcome = await handleRtdnPayload(notification);
+
+    if (messageId) processedRtdnMessages.set(messageId, Date.now());
+
+    console.log(`[RTDN] Notification processed: ${outcome}`);
+
+    return res.status(204).end();
+  } catch (err: any) {
+    console.error(
+      '[RTDN] Processing failed; Pub/Sub will retry:',
+      err?.message || 'unknown error'
+    );
+
+    // Non-2xx makes Pub/Sub redeliver the message later.
+    return res.status(500).json({ error: 'Temporary processing error.' });
+  }
+});
 
 // =============================================================
 // RESTORE GOOGLE PLAY PURCHASES
@@ -4210,7 +4506,9 @@ async function startServer() {
   // Storage must be ready before any request is served.
   await initStore();
 
-  if (
+  if (process.env.SERVE_FRONTEND === 'false') {
+    // API only (automated tests / separately hosted frontend).
+  } else if (
     process.env.NODE_ENV !==
     'production'
   ) {
@@ -4232,6 +4530,13 @@ async function startServer() {
         process.cwd(),
         'dist'
       );
+
+    // express.static ignores dot-directories, so serve the Digital
+    // Asset Links file explicitly.
+    app.get('/.well-known/assetlinks.json', (req, res) => {
+      res.type('application/json');
+      res.sendFile(path.join(distPath, '.well-known', 'assetlinks.json'));
+    });
 
     app.use(
       express.static(
@@ -4277,6 +4582,7 @@ async function startServer() {
 
     server.close();
 
+    // Waits for pending writes (with a timeout) and closes the pool.
     flushStore()
       .catch((err) => {
         console.error(

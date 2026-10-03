@@ -32,7 +32,10 @@ export interface GooglePlayPurchaseRecord {
   packageName?: string;
   purchaseTime: number;
   expiryTime?: number;
-  state: 'VERIFIED' | 'EXPIRED' | 'CANCELLED';
+  // REVOKED: refunded or revoked by Google Play (voided purchase).
+  state: 'VERIFIED' | 'EXPIRED' | 'CANCELLED' | 'REVOKED';
+  // Last Google subscriptionState seen (for support/debugging).
+  googleState?: string;
   verifiedAt: number;
 }
 
@@ -52,7 +55,9 @@ export interface StoredDocument {
 // hash of the bearer token is kept in memory and on disk.
 type StoredSession = PersistedSession;
 
-const DATA_DIR = path.join(process.cwd(), 'data');
+const DATA_DIR = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : path.join(process.cwd(), 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 const DOCUMENTS_FILE = path.join(DATA_DIR, 'documents.json');
@@ -124,7 +129,14 @@ function readJsonFile<T>(filePath: string, defaultValue: T): T {
   return defaultValue;
 }
 
+// Tracks JSON file write failures so callers can report them.
+let jsonWriteSeq = 0;
+const jsonFailedWriteSeqs: number[] = [];
+
 function writeJsonFile<T>(filePath: string, data: T): void {
+  jsonWriteSeq += 1;
+  const seq = jsonWriteSeq;
+
   // Atomic write: write a temp file, then rename over the target.
   const tempPath =
     `${filePath}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
@@ -141,6 +153,9 @@ function writeJsonFile<T>(filePath: string, data: T): void {
     fs.renameSync(tempPath, filePath);
   } catch (err) {
     console.error(`Error writing ${filePath}:`, err);
+
+    jsonFailedWriteSeqs.push(seq);
+    if (jsonFailedWriteSeqs.length > 1000) jsonFailedWriteSeqs.shift();
 
     try {
       if (fs.existsSync(tempPath)) {
@@ -496,22 +511,52 @@ export async function initStore(): Promise<void> {
 }
 
 /**
- * Waits for all pending database writes. Call on shutdown.
+ * Waits for pending database writes, then closes the connection pool.
+ * Call on shutdown.
  */
 export async function flushStore(): Promise<void> {
   if (db) {
-    await db.flush();
+    await db.close();
   }
+}
+
+/**
+ * Marks the current position in the database write queue. Pass the
+ * result to confirmPersisted() after changing data.
+ */
+export function getWriteMark(): number {
+  return db ? db.writeMark() : jsonWriteSeq;
+}
+
+/**
+ * Confirms that every change made since `mark` was written to
+ * PostgreSQL. JSON file storage writes synchronously, so it always
+ * confirms (a failed file write throws earlier).
+ */
+export async function confirmPersisted(
+  mark: number,
+  timeoutMs = 10000
+): Promise<boolean> {
+  if (!db) {
+    return !jsonFailedWriteSeqs.some((seq) => seq > mark);
+  }
+
+  return db.waitForWrites(mark, timeoutMs);
+}
+
+export async function checkDatabaseConnection(): Promise<boolean> {
+  return db ? db.ping() : true;
 }
 
 export function getStorageStatus(): {
   backend: StorageBackendName;
   pendingWrites: number;
   failedWrites: number;
+  connected: boolean;
 } {
   const status = db
     ? db.getStatus()
-    : { pendingWrites: 0, failedWrites: 0 };
+    : { pendingWrites: 0, failedWrites: 0, connected: true };
 
   return {
     backend: getStorageBackendName(),
@@ -717,7 +762,7 @@ export function authenticateUser(
 
   if (!user) {
     throw new Error(
-      'No account found with this email address.'
+      'Incorrect email or password.'
     );
   }
 
@@ -733,7 +778,7 @@ export function authenticateUser(
     password.length > PASSWORD_MAX_LENGTH
   ) {
     throw new Error(
-      'Incorrect password. Please verify your credentials and try again.'
+      'Incorrect email or password.'
     );
   }
 
@@ -750,7 +795,7 @@ export function authenticateUser(
     );
 
     throw new Error(
-      'Incorrect password. Please verify your credentials and try again.'
+      'Incorrect email or password.'
     );
   }
 
@@ -768,7 +813,7 @@ export function authenticateUser(
     )
   ) {
     throw new Error(
-      'Incorrect password. Please verify your credentials and try again.'
+      'Incorrect email or password.'
     );
   }
 
@@ -1661,6 +1706,8 @@ export function checkRateLimit(
   };
 }
 
+export const FREE_DAILY_LIMIT = 5;
+
 export function getDailyUsage(
   identifier: string,
   isPro: boolean
@@ -1683,7 +1730,7 @@ export function getDailyUsage(
     dailyLimit:
       isPro
         ? 999999
-        : 5,
+        : FREE_DAILY_LIMIT,
     dateString:
       today,
   };
@@ -1705,7 +1752,7 @@ export function canPerformAiAction(
 
   return (
     usage.dailyUsed <
-    5
+    FREE_DAILY_LIMIT
   );
 }
 
@@ -1727,6 +1774,62 @@ export function incrementDailyUsage(
   persistUsage(key, usageMap[key]);
 
   return usageMap[key];
+}
+
+/**
+ * Atomically checks the daily limit and reserves one AI action.
+ *
+ * Node.js runs this synchronously, so two simultaneous requests can
+ * never both pass the check for the last remaining free action. The
+ * reservation is released with releaseDailyUsage() if the AI request
+ * fails, so failed requests do not consume the user's quota.
+ */
+export function reserveDailyUsage(
+  identifier: string,
+  isPro: boolean
+): {
+  allowed: boolean;
+  key: string;
+  usage: {
+    dailyUsed: number;
+    dailyLimit: number;
+    dateString: string;
+  };
+} {
+  const today = getTodayString();
+  const key = `${identifier}_${today}`;
+  const current = usageMap[key] || 0;
+  const dailyLimit = isPro ? 999999 : FREE_DAILY_LIMIT;
+
+  if (!isPro && current >= FREE_DAILY_LIMIT) {
+    return {
+      allowed: false,
+      key,
+      usage: { dailyUsed: current, dailyLimit, dateString: today },
+    };
+  }
+
+  usageMap[key] = current + 1;
+  persistUsage(key, usageMap[key]);
+
+  return {
+    allowed: true,
+    key,
+    usage: { dailyUsed: usageMap[key], dailyLimit, dateString: today },
+  };
+}
+
+/**
+ * Returns a reservation made by reserveDailyUsage(). Uses the stored
+ * key so a request that crosses midnight refunds the correct day.
+ */
+export function releaseDailyUsage(key: string): void {
+  const current = usageMap[key] || 0;
+
+  if (current <= 0) return;
+
+  usageMap[key] = current - 1;
+  persistUsage(key, usageMap[key]);
 }
 
 // -------------------------------------------------------------

@@ -4,14 +4,13 @@
 const TOKEN_KEY = 'ai_doc_auth_token';
 const CLIENT_ID_KEY = 'ai_doc_client_id';
 
-// Override at build time with VITE_API_BASE_URL (e.g. the production
-// Cloud Run URL). Falls back to the current backend URL.
-const DEFAULT_API_BASE_URL =
-  'https://ais-dev-gq2p2ijj6ei7rg6rotit6q-119321813297.asia-southeast1.run.app';
-
-const API_BASE_URL = (
-  (import.meta as any).env?.VITE_API_BASE_URL ||
-  DEFAULT_API_BASE_URL
+// The backend URL is set at build time with VITE_API_BASE_URL (the
+// production Cloud Run / custom domain URL). Android release builds
+// refuse to build without it (see vite.config.ts). When it is not set
+// (web build served by the same server), requests use relative /api
+// paths on the current origin.
+const API_BASE_URL = String(
+  (import.meta as any).env?.VITE_API_BASE_URL || ''
 ).replace(/\/$/, '');
 
 function buildApiUrl(endpoint: string): string {

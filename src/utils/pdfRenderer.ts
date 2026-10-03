@@ -81,7 +81,7 @@ export async function renderPdfToImages(
     return pages;
   } finally {
     try {
-      await pdf.destroy();
+      await loadingTask.destroy();
     } catch {
       // ignore
     }

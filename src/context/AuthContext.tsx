@@ -262,12 +262,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  // Single-use nonce issued by the server and embedded by Google in the
+  // signed ID token (prevents token replay). If it cannot be fetched,
+  // sign-in continues without one and the server applies a strict
+  // freshness check instead.
+  const fetchGoogleSignInNonce = async (): Promise<string | undefined> => {
+    try {
+      const res = await apiFetch('/api/auth/google/nonce', { method: 'POST' });
+      if (!res.ok) return undefined;
+      const data = await res.json();
+      return typeof data?.nonce === 'string' ? data.nonce : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
   const signInWithGoogle = async (): Promise<{
     success: boolean;
     requiresConfig?: boolean;
     error?: string;
   }> => {
     try {
+      const googleNonce = await fetchGoogleSignInNonce();
+
       if (isNativeGoogleSignInAvailable()) {
         logger.info('Initiating Android Credential Manager Google Sign-In');
 
@@ -401,7 +418,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             handleError as EventListener
           );
 
-          const launched = launchNativeGoogleSignIn(WEB_CLIENT_ID);
+          const launched = launchNativeGoogleSignIn(WEB_CLIENT_ID, googleNonce);
 
           if (!launched) {
             finish({
@@ -551,6 +568,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         googleId.initialize({
           client_id: WEB_CLIENT_ID,
+          ...(googleNonce ? { nonce: googleNonce } : {}),
 
           callback: async (response: { credential?: string }) => {
             if (isResolved) return;

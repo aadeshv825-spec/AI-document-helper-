@@ -19,8 +19,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import org.json.JSONObject
-import java.security.MessageDigest
-import java.util.UUID
 
 class GoogleSignInManager(
     private val activity: AppCompatActivity,
@@ -33,13 +31,16 @@ class GoogleSignInManager(
 
     private val scope = CoroutineScope(Dispatchers.Main)
 
+    // Server nonces are 32 random bytes encoded as base64url.
+    private val nonceFormat = Regex("^[A-Za-z0-9_-]{32,128}$")
+
     @JavascriptInterface
     fun isGoogleSignInSupported(): Boolean {
         return true
     }
 
     @JavascriptInterface
-    fun launchGoogleSignIn(webClientId: String?) {
+    fun launchGoogleSignIn(webClientId: String?, serverNonce: String?) {
         activity.runOnUiThread {
             scope.launch {
                 try {
@@ -55,22 +56,23 @@ class GoogleSignInManager(
                         Log.w(tag, "Ignoring unexpected web client ID from page")
                     }
 
-                    val rawNonce = UUID.randomUUID().toString()
+                    // The nonce is issued by the server (single use) and
+                    // embedded by Google in the signed ID token, which
+                    // the server verifies to block replayed tokens.
+                    val nonce =
+                        serverNonce?.takeIf { nonceFormat.matches(it) }
 
-                    val digest = MessageDigest.getInstance("SHA-256")
-                        .digest(rawNonce.toByteArray())
-
-                    val hashedNonce = digest.joinToString("") {
-                        "%02x".format(it)
-                    }
-
-                    val googleIdOption =
+                    val googleIdOptionBuilder =
                         GetGoogleIdOption.Builder()
                             .setFilterByAuthorizedAccounts(false)
                             .setServerClientId(clientId)
                             .setAutoSelectEnabled(false)
-                            .setNonce(hashedNonce)
-                            .build()
+
+                    if (nonce != null) {
+                        googleIdOptionBuilder.setNonce(nonce)
+                    }
+
+                    val googleIdOption = googleIdOptionBuilder.build()
 
                     val request =
                         GetCredentialRequest.Builder()

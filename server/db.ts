@@ -111,6 +111,37 @@ const MIGRATION_LOCK_KEY = 7348120931;
 
 const MAX_WRITE_ATTEMPTS = 3;
 
+// Errors that mean "database unreachable / restarting", not "bad data".
+// SQLSTATE classes: 08 connection, 53 insufficient resources,
+// 57P0x operator intervention (shutdown/restart), 40001/40P01 retryable.
+function isTransientDbError(err: any): boolean {
+  const code = String(err?.code || '');
+
+  if (
+    [
+      'ECONNREFUSED',
+      'ECONNRESET',
+      'ETIMEDOUT',
+      'EPIPE',
+      'ENOTFOUND',
+      'EAI_AGAIN',
+      'EHOSTUNREACH',
+      '40001',
+      '40P01',
+    ].includes(code)
+  ) {
+    return true;
+  }
+
+  if (code.startsWith('08') || code.startsWith('53') || code.startsWith('57P')) {
+    return true;
+  }
+
+  const message = String(err?.message || '');
+
+  return /timeout|terminat|Connection|connect/i.test(message) && !/syntax|violat/i.test(message);
+}
+
 export class PostgresStore {
   private pool: InstanceType<typeof Pool>;
 
@@ -120,6 +151,16 @@ export class PostgresStore {
   private pendingWrites = 0;
 
   private failedWrites = 0;
+
+  private writeSeq = 0;
+
+  private completedSeq = 0;
+
+  private failedSeqs: number[] = [];
+
+  private connectionDown = false;
+
+  private closing = false;
 
   constructor(connectionString: string) {
     this.pool = new Pool({
@@ -455,6 +496,14 @@ export class PostgresStore {
   // -----------------------------------------------------------
   // ORDERED WRITE-THROUGH QUEUE
   // -----------------------------------------------------------
+  //
+  // Writes are applied strictly in order. Connection problems
+  // (database restart, network outage) are retried until the database
+  // is reachable again, so no change is dropped during an outage.
+  // Errors caused by the data itself are retried a few times, then
+  // recorded as failed so one bad row cannot block every later write.
+  // Callers use writeMark()/waitForWrites() to confirm their change
+  // reached PostgreSQL before telling the user it was saved.
 
   private enqueue(
     label: string,
@@ -462,55 +511,152 @@ export class PostgresStore {
     params: unknown[]
   ): void {
     this.pendingWrites += 1;
+    this.writeSeq += 1;
+    const seq = this.writeSeq;
 
     this.queue = this.queue.then(async () => {
-      for (
-        let attempt = 1;
-        attempt <= MAX_WRITE_ATTEMPTS;
-        attempt += 1
-      ) {
+      let attempt = 0;
+
+      while (true) {
+        attempt += 1;
+
         try {
           await this.pool.query(sql, params);
+
+          if (this.connectionDown) {
+            this.connectionDown = false;
+            console.log('[DB] PostgreSQL connection restored; pending writes resumed.');
+          }
+
           return;
         } catch (err: any) {
-          if (attempt === MAX_WRITE_ATTEMPTS) {
+          const transient = isTransientDbError(err);
+
+          if (!transient && attempt >= MAX_WRITE_ATTEMPTS) {
             this.failedWrites += 1;
+            this.failedSeqs.push(seq);
+
+            if (this.failedSeqs.length > 1000) {
+              this.failedSeqs.shift();
+            }
 
             console.error(
-              `[DB] Write failed after ${attempt} attempts (${label}):`,
+              `[DB] Write failed permanently after ${attempt} attempts (${label}):`,
+              err?.code || '',
               err?.message || err
             );
 
             return;
           }
 
-          await new Promise((resolve) =>
-            setTimeout(resolve, 250 * attempt)
-          );
+          if (transient && !this.connectionDown) {
+            this.connectionDown = true;
+            console.error(
+              `[DB] PostgreSQL unavailable (${label}); retrying until it recovers:`,
+              err?.code || '',
+              err?.message || err
+            );
+          }
+
+          if (this.closing && transient && attempt >= MAX_WRITE_ATTEMPTS * 4) {
+            // During shutdown give up eventually so the process can exit;
+            // the loss is reported loudly.
+            this.failedWrites += 1;
+            this.failedSeqs.push(seq);
+            console.error(`[DB] Write abandoned during shutdown (${label}).`);
+            return;
+          }
+
+          const delay = Math.min(5000, 250 * 2 ** Math.min(attempt, 5));
+          await new Promise((resolve) => setTimeout(resolve, delay));
         }
       }
     }).finally(() => {
       this.pendingWrites -= 1;
+      this.completedSeq = Math.max(this.completedSeq, seq);
     });
+  }
+
+  /** Sequence number of the most recently queued write. */
+  writeMark(): number {
+    return this.writeSeq;
+  }
+
+  /**
+   * Waits until every write queued so far has been applied. Returns
+   * false if any write queued after `sinceMark` failed, or if the
+   * writes did not complete within the timeout (database outage).
+   */
+  async waitForWrites(
+    sinceMark: number,
+    timeoutMs = 10000
+  ): Promise<boolean> {
+    const target = this.writeSeq;
+
+    if (target <= sinceMark) return true;
+
+    const tail = this.queue;
+    let timer: NodeJS.Timeout | undefined;
+
+    const finished = await Promise.race([
+      tail.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+
+    if (timer) clearTimeout(timer);
+
+    if (!finished && this.completedSeq < target) return false;
+
+    return !this.failedSeqs.some((seq) => seq > sinceMark && seq <= target);
   }
 
   getStatus(): {
     pendingWrites: number;
     failedWrites: number;
+    connected: boolean;
   } {
     return {
       pendingWrites: this.pendingWrites,
       failedWrites: this.failedWrites,
+      connected: !this.connectionDown,
     };
+  }
+
+  async ping(): Promise<boolean> {
+    try {
+      await this.pool.query('SELECT 1');
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async flush(): Promise<void> {
     await this.queue;
   }
 
-  async close(): Promise<void> {
-    await this.flush();
-    await this.pool.end();
+  async close(timeoutMs = 25000): Promise<void> {
+    this.closing = true;
+
+    let timer: NodeJS.Timeout | undefined;
+
+    await Promise.race([
+      this.flush(),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          console.error(
+            `[DB] Shutdown timeout: ${this.pendingWrites} write(s) still pending.`
+          );
+          resolve();
+        }, timeoutMs);
+      }),
+    ]);
+
+    if (timer) clearTimeout(timer);
+
+    await this.pool.end().catch(() => undefined);
   }
 
   upsertUser(user: any): void {
@@ -627,7 +773,7 @@ export class PostgresStore {
       `INSERT INTO app_usage (usage_key, count, updated_at)
        VALUES ($1, $2, now())
        ON CONFLICT (usage_key) DO UPDATE
-         SET count = GREATEST(app_usage.count, EXCLUDED.count),
+         SET count = EXCLUDED.count,
              updated_at = now()`,
       [key, count]
     );

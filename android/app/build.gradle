@@ -11,8 +11,10 @@ android {
         applicationId "com.aidocumenthelper.app"
         minSdk 24
         targetSdk 36
-        versionCode 7
-        versionName "1.0.0"
+        // Release builds pass VERSION_CODE / VERSION_NAME from the release
+        // workflow; it must be higher than any version uploaded to Play.
+        versionCode((System.getenv("VERSION_CODE") ?: "7").toInteger())
+        versionName(System.getenv("VERSION_NAME") ?: "1.0.0")
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
