@@ -1,3 +1,4 @@
+
 node_modules/
 build/
 dist/
@@ -7,3 +8,17 @@ coverage/
 .env*
 !.env.example
 data/*.json
+
+# Android local configuration
+local.properties
+**/local.properties
+
+# Signing keys
+*.jks
+*.keystore
+*.p12
+*.pfx
+
+# Gradle cache
+.gradle/
+**/.gradle/
