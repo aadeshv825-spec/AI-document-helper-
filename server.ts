@@ -34,24 +34,63 @@ import {
   recordGooglePlayPurchase,
   getUserGooglePlayPurchases,
   GooglePlayPurchaseRecord,
+  initStore,
+  flushStore,
+  PASSWORD_MIN_LENGTH,
+  PASSWORD_MAX_LENGTH,
 } from './server/store.ts';
 
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+
+// Cloud Run sits behind exactly one Google front-end proxy.
+// This makes req.ip the real client IP instead of a spoofable
+// X-Forwarded-For value supplied by the client.
+app.set('trust proxy', 1);
+app.disable('x-powered-by');
 
 app.use(express.json({ limit: '30mb' }));
 app.use(express.urlencoded({ extended: true, limit: '30mb' }));
+
+// Basic security headers
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+
+  if (IS_PRODUCTION) {
+    res.setHeader(
+      'Strict-Transport-Security',
+      'max-age=31536000; includeSubDomains'
+    );
+  }
+
+  next();
+});
+
+// Allowed cross-origin callers: Android WebView asset origin,
+// optional extra origins from ALLOWED_ORIGINS (comma-separated),
+// and localhost only outside production.
+const ALLOWED_CORS_ORIGINS = new Set<string>([
+  'https://appassets.androidplatform.net',
+  ...(process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((o) => o.trim().replace(/\/$/, ''))
+    .filter(Boolean),
+  ...(IS_PRODUCTION
+    ? []
+    : ['http://localhost:3000', 'http://localhost:5173']),
+]);
 
 // CORS support for Android WebView / appassets origin
 app.use((req, res, next) => {
   const origin = req.headers.origin;
 
   if (
-    origin === 'https://appassets.androidplatform.net' ||
-    origin === 'http://localhost:3000' ||
-    origin === 'http://localhost:5173'
+    origin &&
+    ALLOWED_CORS_ORIGINS.has(origin)
   ) {
     res.setHeader('Access-Control-Allow-Origin', origin);
   }
@@ -74,12 +113,56 @@ app.use((req, res, next) => {
   next();
 });
 
+function getClientIp(req: express.Request): string {
+  return (
+    req.ip ||
+    req.socket.remoteAddress ||
+    'unknown'
+  );
+}
+
+// Stricter limits for credential and purchase endpoints
+// (brute-force / credential-stuffing protection).
+const SENSITIVE_RATE_LIMITS: Array<{
+  prefix: string;
+  limit: number;
+}> = [
+  { prefix: '/api/auth/login', limit: 20 },
+  { prefix: '/api/auth/register', limit: 10 },
+  { prefix: '/api/auth/google', limit: 30 },
+  { prefix: '/api/billing/google-play/verify-purchase', limit: 20 },
+  { prefix: '/api/billing/google-play/restore-purchases', limit: 20 },
+];
+
+app.use('/api/', (req, res, next) => {
+  const fullPath = req.originalUrl.split('?')[0];
+
+  const rule = SENSITIVE_RATE_LIMITS.find((r) =>
+    fullPath.startsWith(r.prefix)
+  );
+
+  if (!rule || req.method === 'OPTIONS') {
+    return next();
+  }
+
+  const { allowed, retryAfter } = checkRateLimit(
+    `${rule.prefix}:${getClientIp(req)}`,
+    rule.limit
+  );
+
+  if (!allowed) {
+    return res.status(429).json({
+      error: 'Too many attempts. Please wait a moment before trying again.',
+      retryAfter,
+    });
+  }
+
+  next();
+});
+
 // Global API rate limiting middleware for abuse prevention
 app.use('/api/', (req, res, next) => {
-  const ip =
-    (req.headers['x-forwarded-for'] as string) ||
-    req.socket.remoteAddress ||
-    '127.0.0.1';
+  const ip = getClientIp(req);
 
   const { allowed, retryAfter } = checkRateLimit(ip, 120);
 
@@ -127,6 +210,39 @@ function isProActive(
   return false;
 }
 
+// Session tokens are accepted only from the Authorization header.
+function getTokenFromRequest(
+  req: express.Request
+): string | null {
+  const authHeader = req.headers.authorization;
+
+  if (
+    typeof authHeader !== 'string' ||
+    !authHeader.startsWith('Bearer ')
+  ) {
+    return null;
+  }
+
+  const token = authHeader.slice(7).trim();
+
+  if (!token || token.length > 256) {
+    return null;
+  }
+
+  return token;
+}
+
+// Usage for a signed-in user is tracked under the same identifier
+// that the AI endpoints increment (see getAuthContext).
+function getUserUsage(
+  user: Pick<StoredUser, 'id' | 'plan' | 'proUntil'>
+) {
+  return getDailyUsage(
+    `user:${user.id}`,
+    isProActive(user)
+  );
+}
+
 function getAuthContext(req: express.Request): {
   user: StoredUser | null;
   identifier: string;
@@ -137,7 +253,7 @@ function getAuthContext(req: express.Request): {
 
   const identifier = user
     ? `user:${user.id}`
-    : `ip:${req.ip || req.socket.remoteAddress || 'unknown'}`;
+    : `ip:${getClientIp(req)}`;
 
   const isPro = isProActive(user);
 
@@ -1021,6 +1137,9 @@ function serializeUser(user: StoredUser) {
   };
 }
 
+const EMAIL_PATTERN =
+  /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 app.post('/api/auth/register', (req, res) => {
   try {
     const {
@@ -1029,17 +1148,50 @@ app.post('/api/auth/register', (req, res) => {
       password,
     } = req.body;
 
-    if (!email || !password) {
+    if (
+      !email ||
+      !password ||
+      typeof email !== 'string' ||
+      typeof password !== 'string'
+    ) {
       return res.status(400).json({
         error:
           'Email and password are required.',
       });
     }
 
-    if (password.length < 6) {
+    if (
+      email.length > 254 ||
+      !EMAIL_PATTERN.test(email.trim())
+    ) {
+      return res.status(400).json({
+        error:
+          'Please enter a valid email address.',
+      });
+    }
+
+    if (
+      name !== undefined &&
+      name !== null &&
+      typeof name !== 'string'
+    ) {
+      return res.status(400).json({
+        error:
+          'Invalid name.',
+      });
+    }
+
+    if (password.length < PASSWORD_MIN_LENGTH) {
       return res.status(400).json({
         error:
           'Password must be at least 6 characters long.',
+      });
+    }
+
+    if (password.length > PASSWORD_MAX_LENGTH) {
+      return res.status(400).json({
+        error:
+          `Password must be at most ${PASSWORD_MAX_LENGTH} characters long.`,
       });
     }
 
@@ -1052,10 +1204,7 @@ app.post('/api/auth/register', (req, res) => {
       password
     );
 
-    const usage = getDailyUsage(
-      user.id,
-      isProActive(user)
-    );
+    const usage = getUserUsage(user);
 
     res.json({
       token,
@@ -1078,7 +1227,14 @@ app.post('/api/auth/login', (req, res) => {
       password,
     } = req.body;
 
-    if (!email || !password) {
+    if (
+      !email ||
+      !password ||
+      typeof email !== 'string' ||
+      typeof password !== 'string' ||
+      email.length > 254 ||
+      password.length > PASSWORD_MAX_LENGTH
+    ) {
       return res.status(400).json({
         error:
           'Email and password are required.',
@@ -1093,10 +1249,7 @@ app.post('/api/auth/login', (req, res) => {
       password
     );
 
-    const usage = getDailyUsage(
-      user.id,
-      isProActive(user)
-    );
+    const usage = getUserUsage(user);
 
     res.json({
       token,
@@ -1119,6 +1272,79 @@ app.post('/api/auth/login', (req, res) => {
 interface OAuthStateData {
   redirectUri: string;
   createdAt: number;
+}
+
+const OAUTH_STATE_TTL_MS = 15 * 60 * 1000;
+
+const OAUTH_CALLBACK_PATHS = [
+  '/auth/google/callback',
+  '/auth/callback',
+];
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// JSON that is safe to embed inside an inline <script> block.
+function jsonForScript(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+}
+
+// Only redirect URIs pointing at this app's own callback paths
+// are accepted, preventing authorization codes being sent elsewhere.
+function getAllowedOAuthRedirectUris(
+  req: express.Request
+): Set<string> {
+  const allowed = new Set<string>();
+
+  const appUrl =
+    (process.env.APP_URL || '').trim().replace(/\/$/, '');
+
+  const origins: string[] = [];
+
+  if (/^https?:\/\//i.test(appUrl)) {
+    origins.push(appUrl);
+  }
+
+  const host = req.get('host');
+
+  if (host) {
+    origins.push(`${req.protocol}://${host}`);
+  }
+
+  for (const origin of origins) {
+    for (const callbackPath of OAUTH_CALLBACK_PATHS) {
+      allowed.add(`${origin}${callbackPath}`);
+    }
+  }
+
+  for (const extra of (process.env.GOOGLE_OAUTH_REDIRECT_URIS || '').split(',')) {
+    const trimmed = extra.trim();
+
+    if (trimmed) {
+      allowed.add(trimmed);
+    }
+  }
+
+  return allowed;
+}
+
+function getOriginOf(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
 }
 
 const googleOAuthStates =
@@ -1199,6 +1425,17 @@ app.get('/api/auth/google/url', (req, res) => {
             'host'
           )}/auth/google/callback`
     );
+
+  if (
+    typeof redirectUri !== 'string' ||
+    !getAllowedOAuthRedirectUris(req).has(redirectUri)
+  ) {
+    return res.status(400).json({
+      configured: true,
+      error:
+        'The requested OAuth redirect URI is not allowed.',
+    });
+  }
 
   const state =
     crypto.randomBytes(24).toString('hex');
@@ -1353,6 +1590,16 @@ app.post('/api/auth/google/native', async (req, res) => {
     const verifiedSub =
       payload.sub;
 
+    if (
+      !verifiedSub ||
+      typeof verifiedSub !== 'string'
+    ) {
+      return res.status(401).json({
+        error:
+          'Google token is missing a valid account identifier.',
+      });
+    }
+
     const verifiedName =
       payload.name ||
       payload.given_name ||
@@ -1374,10 +1621,7 @@ app.post('/api/auth/google/native', async (req, res) => {
         avatarUrl: verifiedPicture,
       });
 
-    const usage = getDailyUsage(
-      user.id,
-      isProActive(user)
-    );
+    const usage = getUserUsage(user);
 
     console.log(
       `[GoogleAuth] Cryptographically verified and authenticated Android user: ${user.email}`
@@ -1397,7 +1641,6 @@ app.post('/api/auth/google/native', async (req, res) => {
 
     res.status(500).json({
       error:
-        err.message ||
         'Failed to authenticate with verified Google account.',
     });
   }
@@ -1539,30 +1782,56 @@ app.get(
     const stateData =
       typeof state === 'string'
         ? googleOAuthStates.get(state)
-        : null;
+        : undefined;
 
     if (typeof state === 'string') {
       googleOAuthStates.delete(state);
     }
 
-    const appUrl =
-      (process.env.APP_URL || '')
-        .replace(/\/$/, '');
+    // The state parameter is mandatory (CSRF / login-forgery protection).
+    if (
+      !stateData ||
+      Date.now() - stateData.createdAt >
+        OAUTH_STATE_TTL_MS
+    ) {
+      return res.status(400).send(`
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <title>Sign-In Expired</title>
+          </head>
+          <body style="background:#0f172a;color:#f8fafc;font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+            <div style="text-align:center;padding:24px;background:#1e293b;border-radius:12px;border:1px solid #ef4444;max-width:340px;">
+              <h3 style="margin:0 0 8px 0;color:#f87171;">Sign-In Expired</h3>
+              <p style="color:#94a3b8;font-size:13px;margin:0;">This sign-in request is invalid or has expired. Please try again.</p>
+            </div>
+            <script>
+              if (window.opener) {
+                window.opener.postMessage(
+                  {
+                    type: 'GOOGLE_AUTH_ERROR',
+                    error: 'Sign-in request expired. Please try again.'
+                  },
+                  '*'
+                );
 
-    const callbackPath =
-      req.path.endsWith('/')
-        ? req.path.slice(0, -1)
-        : req.path;
+                setTimeout(() => {
+                  window.close();
+                }, 2000);
+              }
+            </script>
+          </body>
+        </html>
+      `);
+    }
 
     const redirectUri =
-      stateData?.redirectUri ||
-      (
-        appUrl
-          ? `${appUrl}${callbackPath}`
-          : `${req.protocol}://${req.get(
-              'host'
-            )}${callbackPath}`
-      );
+      stateData.redirectUri;
+
+    // Session tokens are only ever posted to this app's own origin.
+    const postMessageTargetOrigin =
+      getOriginOf(redirectUri) ||
+      `${req.protocol}://${req.get('host')}`;
 
     try {
       const tokenRes =
@@ -1626,9 +1895,25 @@ app.get(
       const profile =
         (await userRes.json()) as any;
 
-      if (!profile.email) {
+      if (!profile.email || typeof profile.email !== 'string') {
         throw new Error(
           'Google did not provide an email address.'
+        );
+      }
+
+      // Never link or create accounts for unverified Google emails.
+      if (
+        profile.email_verified !== true &&
+        profile.email_verified !== 'true'
+      ) {
+        throw new Error(
+          'Google account email is not verified.'
+        );
+      }
+
+      if (!profile.sub || typeof profile.sub !== 'string') {
+        throw new Error(
+          'Google did not provide a valid account identifier.'
         );
       }
 
@@ -1647,10 +1932,7 @@ app.get(
             profile.picture,
         });
 
-      const usage = getDailyUsage(
-        user.id,
-        isProActive(user)
-      );
+      const usage = getUserUsage(user);
 
       res.send(`
         <!DOCTYPE html>
@@ -1700,7 +1982,7 @@ app.get(
               <div class="icon">✓</div>
 
               <h3 style="margin:0 0 6px 0;font-size:17px;font-weight:600;">
-                Welcome, ${user.name}!
+                Welcome, ${escapeHtml(user.name)}!
               </h3>
 
               <p style="color:#94a3b8;font-size:13px;margin:0 0 12px 0;">
@@ -1714,15 +1996,15 @@ app.get(
                   window.opener.postMessage(
                     {
                       type: 'GOOGLE_AUTH_SUCCESS',
-                      token: ${JSON.stringify(token)},
-                      user: ${JSON.stringify(
+                      token: ${jsonForScript(token)},
+                      user: ${jsonForScript(
                         serializeUser(user)
                       )},
-                      usage: ${JSON.stringify(
+                      usage: ${jsonForScript(
                         usage
                       )}
                     },
-                    '*'
+                    ${jsonForScript(postMessageTargetOrigin)}
                   );
 
                   setTimeout(() => {
@@ -1759,7 +2041,7 @@ app.get(
               </h3>
 
               <p style="color:#94a3b8;font-size:13px;margin:0 0 16px 0;">
-                ${err.message || 'Unable to complete Google authentication.'}
+                ${escapeHtml(err.message || 'Unable to complete Google authentication.')}
               </p>
 
               <button
@@ -1775,7 +2057,7 @@ app.get(
                 window.opener.postMessage(
                   {
                     type: 'GOOGLE_AUTH_ERROR',
-                    error: ${JSON.stringify(
+                    error: ${jsonForScript(
                       err.message ||
                         'Google authentication failed.'
                     )}
@@ -1821,10 +2103,7 @@ app.get('/api/auth/me', (req, res) => {
   }
 
   const usage =
-    getDailyUsage(
-      user.id,
-      isProActive(user)
-    );
+    getUserUsage(user);
 
   res.json({
     authenticated: true,
@@ -1975,10 +2254,7 @@ app.post('/api/user/plan', (req, res) => {
     );
 
   const usage =
-    getDailyUsage(
-      user.id,
-      plan === 'pro'
-    );
+    getUserUsage(user);
 
   res.json({
     user: serializeUser(updated),
@@ -2156,6 +2432,27 @@ function isGooglePlaySubscriptionActive(
   );
 }
 
+const GOOGLE_PLAY_PACKAGE_NAME =
+  'com.aidocumenthelper.app';
+
+// The Android app passes the signed-in user id as the obfuscated
+// account id when launching the billing flow. If Google reports one,
+// it must match the account claiming the purchase.
+function isGooglePlayAccountMatch(
+  subscription: any,
+  user: StoredUser
+): boolean {
+  const obfuscatedAccountId =
+    subscription?.externalAccountIdentifiers
+      ?.obfuscatedExternalAccountId;
+
+  if (!obfuscatedAccountId) {
+    return true;
+  }
+
+  return obfuscatedAccountId === user.id;
+}
+
 // =============================================================
 // GOOGLE PLAY PURCHASE VERIFICATION
 // =============================================================
@@ -2186,7 +2483,8 @@ app.post(
     if (
       !purchaseToken ||
       typeof purchaseToken !== 'string' ||
-      purchaseToken.trim().length === 0
+      purchaseToken.trim().length === 0 ||
+      purchaseToken.length > 4096
     ) {
       return res.status(400).json({
         error:
@@ -2196,11 +2494,12 @@ app.post(
 
     if (
       !sku ||
+      typeof sku !== 'string' ||
       !isValidGooglePlaySku(sku)
     ) {
       return res.status(400).json({
         error:
-          `Invalid product SKU: "${sku}". Must be one of: ${Object.values(
+          `Invalid product SKU. Must be one of: ${Object.values(
             GOOGLE_PLAY_SKUS
           ).join(', ')}.`,
       });
@@ -2270,6 +2569,18 @@ app.post(
       const now =
         Date.now();
 
+      if (
+        !isGooglePlayAccountMatch(
+          subscription,
+          user
+        )
+      ) {
+        return res.status(409).json({
+          error:
+            'This Google Play purchase belongs to a different app account.',
+        });
+      }
+
       // Never trust SKU supplied by client alone.
       if (
         verifiedSku !== sku
@@ -2314,7 +2625,10 @@ app.post(
 
       const verifiedOrderId =
         lineItem?.latestSuccessfulOrderId ||
-        orderId ||
+        (typeof orderId === 'string' &&
+        orderId.length <= 100
+          ? orderId
+          : '') ||
         `GPA.${Date.now()}-${crypto
           .randomBytes(3)
           .toString('hex')
@@ -2332,14 +2646,6 @@ app.post(
           requestBody: {},
         });
       }
-
-      // Activate Pro only after successful verification and acknowledgement.
-      const updated =
-        updateUserPlan(
-          user.id,
-          'pro',
-          expiryTime
-        );
 
       const purchaseRecord:
         GooglePlayPurchaseRecord =
@@ -2380,15 +2686,21 @@ app.post(
             Date.now(),
         };
 
+      // Record first: this refuses tokens already linked to another account.
       recordGooglePlayPurchase(
         purchaseRecord
       );
 
-      const usage =
-        getDailyUsage(
+      // Activate Pro only after successful verification and acknowledgement.
+      const updated =
+        updateUserPlan(
           user.id,
-          true
+          'pro',
+          expiryTime
         );
+
+      const usage =
+        getUserUsage(user);
 
       console.log(
         `[Google Play Billing] Verified with Google Play API for ${user.email} (${user.id}), SKU: ${verifiedSku}, Order: ${verifiedOrderId}, Expiry: ${new Date(
@@ -2468,6 +2780,172 @@ app.post(
 );
 
 // =============================================================
+// Verifies a subscription token with Google Play for a user and,
+// if active, records/acknowledges it. Never throws.
+async function verifyGooglePlaySubscriptionForUser(
+  token: string,
+  user: StoredUser
+): Promise<
+  | { status: 'active'; record: GooglePlayPurchaseRecord }
+  | { status: 'inactive' }
+  | { status: 'error' }
+> {
+  try {
+    const publisher =
+      getGooglePlayPublisher();
+
+    const googleResponse =
+      await publisher.purchases.subscriptionsv2.get(
+        {
+          packageName:
+            GOOGLE_PLAY_PACKAGE_NAME,
+          token,
+        }
+      );
+
+    const subscription =
+      googleResponse.data;
+
+    if (
+      !isGooglePlaySubscriptionActive(
+        subscription
+      ) ||
+      !isGooglePlayAccountMatch(
+        subscription,
+        user
+      )
+    ) {
+      return { status: 'inactive' };
+    }
+
+    const lineItem =
+      subscription
+        .lineItems?.[0];
+
+    const verifiedSku =
+      lineItem?.productId ||
+      '';
+
+    if (
+      !verifiedSku ||
+      !isValidGooglePlaySku(
+        verifiedSku
+      )
+    ) {
+      return { status: 'inactive' };
+    }
+
+    const expiryTime =
+      getGooglePlaySubscriptionExpiry(
+        subscription
+      );
+
+    if (!expiryTime) {
+      return { status: 'inactive' };
+    }
+
+    // Acknowledge restored subscription after Google Play verification.
+    if (
+      subscription.acknowledgementState ===
+      'ACKNOWLEDGEMENT_STATE_PENDING'
+    ) {
+      await publisher.purchases.subscriptions.acknowledge({
+        packageName: GOOGLE_PLAY_PACKAGE_NAME,
+        subscriptionId: verifiedSku,
+        token,
+        requestBody: {},
+      });
+    }
+
+    const existingRecord =
+      findGooglePlayPurchaseByToken(
+        token
+      );
+
+    const verifiedOrderId =
+      lineItem
+        ?.latestSuccessfulOrderId ||
+      existingRecord?.orderId ||
+      `GPA.${Date.now()}-${crypto
+        .randomBytes(3)
+        .toString('hex')
+        .toUpperCase()}`;
+
+    const purchaseRecord:
+      GooglePlayPurchaseRecord =
+      {
+        id:
+          existingRecord?.id ||
+          `gp_${Date.now()}_${crypto
+            .randomBytes(3)
+            .toString('hex')}`,
+
+        userId:
+          user.id,
+
+        purchaseToken:
+          token,
+
+        sku:
+          verifiedSku,
+
+        orderId:
+          verifiedOrderId,
+
+        packageName:
+          GOOGLE_PLAY_PACKAGE_NAME,
+
+        purchaseTime:
+          subscription.startTime
+            ? Date.parse(
+                subscription.startTime
+              )
+            : Date.now(),
+
+        expiryTime:
+          expiryTime,
+
+        state:
+          'VERIFIED',
+
+        verifiedAt:
+          Date.now(),
+      };
+
+    recordGooglePlayPurchase(
+      purchaseRecord
+    );
+
+    return {
+      status: 'active',
+      record: purchaseRecord,
+    };
+  } catch (verifyErr: any) {
+    const status =
+      verifyErr?.response?.status ||
+      verifyErr?.code;
+
+    console.error(
+      '[Google Play Billing] Restore token verification failed:',
+      verifyErr?.response?.data ||
+        verifyErr?.message ||
+        verifyErr
+    );
+
+    // 400/404/410 mean Google does not recognise the token.
+    if (
+      status === 400 ||
+      status === 404 ||
+      status === 410
+    ) {
+      return { status: 'inactive' };
+    }
+
+    return { status: 'error' };
+  }
+}
+
+// =============================================================
 // RESTORE GOOGLE PLAY PURCHASES
 // =============================================================
 
@@ -2496,19 +2974,72 @@ app.post(
     const now =
       Date.now();
 
-    // First try already-verified server records.
-    let activePurchase =
-      userPurchases.find(
-        (p) =>
-          p.state === 'VERIFIED' &&
-          (
-            !p.expiryTime ||
-            p.expiryTime > now
-          )
+    let activePurchase:
+      GooglePlayPurchaseRecord | undefined;
+
+    // Re-check existing server records with Google Play so that
+    // refunded / revoked / cancelled subscriptions are not restored
+    // and renewed subscriptions are picked up.
+    const isLocallyActive = (
+      p: GooglePlayPurchaseRecord
+    ) =>
+      p.state === 'VERIFIED' &&
+      (
+        !p.expiryTime ||
+        p.expiryTime > now
       );
 
-    // If no local active record exists,
-    // verify tokens submitted by device directly with Google.
+    const localCandidates =
+      [...userPurchases]
+        .sort(
+          (a, b) =>
+            (b.expiryTime || 0) -
+            (a.expiryTime || 0)
+        )
+        .slice(0, 10);
+
+    for (const record of localCandidates) {
+      const result =
+        await verifyGooglePlaySubscriptionForUser(
+          record.purchaseToken,
+          user
+        );
+
+      if (result.status === 'active') {
+        activePurchase = result.record;
+        break;
+      }
+
+      if (result.status === 'inactive') {
+        if (record.state !== 'VERIFIED') {
+          continue;
+        }
+
+        try {
+          recordGooglePlayPurchase({
+            ...record,
+            state: 'EXPIRED',
+            verifiedAt: Date.now(),
+          });
+        } catch (markErr) {
+          console.error(
+            '[Google Play Billing] Failed to mark purchase inactive:',
+            markErr
+          );
+        }
+
+        continue;
+      }
+
+      // Google Play API temporarily unavailable: keep the previously
+      // verified, unexpired server record instead of removing access.
+      if (isLocallyActive(record)) {
+        activePurchase = record;
+        break;
+      }
+    }
+
+    // Then verify tokens submitted by the device directly with Google.
     if (
       !activePurchase &&
       Array.isArray(
@@ -2516,11 +3047,12 @@ app.post(
       )
     ) {
       for (
-        const rawToken of purchaseTokens
+        const rawToken of purchaseTokens.slice(0, 20)
       ) {
         if (
           typeof rawToken !==
-          'string'
+            'string' ||
+          rawToken.length > 4096
         ) {
           continue;
         }
@@ -2545,131 +3077,15 @@ app.post(
           continue;
         }
 
-        try {
-          const publisher =
-            getGooglePlayPublisher();
-
-          const googleResponse =
-            await publisher.purchases.subscriptionsv2.get(
-              {
-                packageName:
-                  'com.aidocumenthelper.app',
-                token,
-              }
-            );
-
-          const subscription =
-            googleResponse.data;
-
-          if (
-            !isGooglePlaySubscriptionActive(
-              subscription
-            )
-          ) {
-            continue;
-          }
-
-          const lineItem =
-            subscription
-              .lineItems?.[0];
-
-          const verifiedSku =
-            lineItem?.productId ||
-            '';
-
-          if (
-            !verifiedSku ||
-            !isValidGooglePlaySku(
-              verifiedSku
-            )
-          ) {
-            continue;
-          }
-
-          const expiryTime =
-            getGooglePlaySubscriptionExpiry(
-              subscription
-            );
-
-          if (!expiryTime) {
-            continue;
-          }
-
-          // Acknowledge restored subscription after Google Play verification.
-          if (
-            subscription.acknowledgementState ===
-            'ACKNOWLEDGEMENT_STATE_PENDING'
-          ) {
-            await publisher.purchases.subscriptions.acknowledge({
-              packageName: 'com.aidocumenthelper.app',
-              subscriptionId: verifiedSku,
-              token,
-              requestBody: {},
-            });
-          }
-
-          const verifiedOrderId =
-            lineItem
-              ?.latestSuccessfulOrderId ||
-            `GPA.${Date.now()}-${crypto
-              .randomBytes(3)
-              .toString('hex')
-              .toUpperCase()}`;
-
-          const purchaseRecord:
-            GooglePlayPurchaseRecord =
-            {
-              id: `gp_${Date.now()}_${crypto
-                .randomBytes(3)
-                .toString('hex')}`,
-
-              userId:
-                user.id,
-
-              purchaseToken:
-                token,
-
-              sku:
-                verifiedSku,
-
-              orderId:
-                verifiedOrderId,
-
-              packageName:
-                'com.aidocumenthelper.app',
-
-              purchaseTime:
-                subscription.startTime
-                  ? Date.parse(
-                      subscription.startTime
-                    )
-                  : Date.now(),
-
-              expiryTime:
-                expiryTime,
-
-              state:
-                'VERIFIED',
-
-              verifiedAt:
-                Date.now(),
-            };
-
-          recordGooglePlayPurchase(
-            purchaseRecord
+        const result =
+          await verifyGooglePlaySubscriptionForUser(
+            token,
+            user
           );
 
-          activePurchase =
-            purchaseRecord;
-
+        if (result.status === 'active') {
+          activePurchase = result.record;
           break;
-        } catch (verifyErr: any) {
-          console.error(
-            '[Google Play Billing] Restore token verification failed:',
-            verifyErr?.response?.data ||
-              verifyErr?.message ||
-              verifyErr
-          );
         }
       }
     }
@@ -2686,10 +3102,7 @@ app.post(
         );
 
       const usage =
-        getDailyUsage(
-          user.id,
-          true
-        );
+        getUserUsage(user);
 
       return res.json({
         success: true,
@@ -2781,7 +3194,7 @@ app.get(
           ...u,
           plan: proActive ? 'pro' : 'free',
           proUntil: proActive ? u.proUntil : undefined,
-          usage: getDailyUsage(u.id, proActive),
+          usage: getDailyUsage(`user:${u.id}`, proActive),
         };
       });
 
@@ -2839,10 +3252,7 @@ app.post(
         );
 
       const usage =
-        getDailyUsage(
-          updated.id,
-          plan === 'pro'
-        );
+        getUserUsage(updated);
 
       res.json({
         success: true,
@@ -3075,31 +3485,20 @@ app.post(
 );
 
 // =============================================================
-// ANDROID PROJECT DOWNLOAD
+// ANDROID PROJECT DOWNLOAD (REMOVED)
 // =============================================================
-
-app.get(
-  '/api/android/download-project',
-  (req, res) => {
-    const zipPath =
-      path.join(
-        process.cwd(),
-        'public',
-        'android-project.zip'
-      );
-
-    res.download(
-      zipPath,
-      'ai-document-helper-android-project.zip'
-    );
-  }
-);
+// The public Android project archive endpoint was removed because the
+// archive contained signing material. Android releases are built from
+// source by the GitHub Actions release workflow.
 
 // =============================================================
 // VITE SERVER
 // =============================================================
 
 async function startServer() {
+  // Storage must be ready before any request is served.
+  await initStore();
+
   if (
     process.env.NODE_ENV !==
     'production'
@@ -3142,7 +3541,7 @@ async function startServer() {
     );
   }
 
-  app.listen(
+  const server = app.listen(
     PORT,
     '0.0.0.0',
     () => {
@@ -3151,6 +3550,43 @@ async function startServer() {
       );
     }
   );
+
+  // Cloud Run sends SIGTERM before stopping an instance. Finish
+  // pending database writes before exiting.
+  let shuttingDown = false;
+
+  const shutdown = (signal: string) => {
+    if (shuttingDown) return;
+
+    shuttingDown = true;
+
+    console.log(
+      `[Server] Received ${signal}; flushing storage and shutting down.`
+    );
+
+    server.close();
+
+    flushStore()
+      .catch((err) => {
+        console.error(
+          '[Server] Failed to flush storage during shutdown:',
+          err
+        );
+      })
+      .finally(() => {
+        process.exit(0);
+      });
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error(
+    '[Server] Failed to start:',
+    err
+  );
+
+  process.exit(1);
+});

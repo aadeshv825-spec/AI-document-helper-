@@ -22,3 +22,27 @@ local.properties
 # Gradle cache
 .gradle/
 **/.gradle/
+
+# Signing material, certificates and service-account keys
+*.pem
+*.key
+*.der
+*service-account*.json
+*-credentials.json
+upload_certificate*
+
+# Android build outputs and IDE files
+*.aab
+*.apk
+android/app/build/
+android/build/
+android/.idea/
+*.iml
+
+# Generated archives (must never be committed; may contain secrets)
+android-project.zip
+android-project.tar.gz
+
+# Local data and backups
+data/
+*.corrupt-*

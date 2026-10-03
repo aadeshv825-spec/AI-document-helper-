@@ -1,6 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import {
+  PostgresStore,
+  PersistedSession,
+} from './db.ts';
 
 export interface StoredUser {
   id: string;
@@ -44,12 +48,9 @@ export interface StoredDocument {
   category: string;
 }
 
-interface StoredSession {
-  token: string;
-  userId: string;
-  createdAt: number;
-  expiresAt: number;
-}
+// Session tokens are never stored in plaintext. Only a SHA-256
+// hash of the bearer token is kept in memory and on disk.
+type StoredSession = PersistedSession;
 
 const DATA_DIR = path.join(process.cwd(), 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
@@ -58,67 +59,294 @@ const DOCUMENTS_FILE = path.join(DATA_DIR, 'documents.json');
 const USAGE_FILE = path.join(DATA_DIR, 'usage.json');
 const PURCHASES_FILE = path.join(DATA_DIR, 'purchases.json');
 
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+// -------------------------------------------------------------
+// STORAGE BACKEND SELECTION
+// -------------------------------------------------------------
+//
+// - DATABASE_URL set   -> PostgreSQL (permanent storage).
+// - DATABASE_URL unset -> local JSON files under data/ (development
+//   only; NOT permanent on Cloud Run).
+
+const DATABASE_URL = (
+  process.env.DATABASE_URL || ''
+).trim();
+
+const REQUIRE_DATABASE =
+  process.env.REQUIRE_DATABASE === 'true';
+
+let db: PostgresStore | null = null;
+
+export type StorageBackendName =
+  | 'postgres'
+  | 'json-file';
+
+export function getStorageBackendName(): StorageBackendName {
+  return DATABASE_URL ? 'postgres' : 'json-file';
+}
+
+function ensureDataDir(): void {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
 }
 
 function readJsonFile<T>(filePath: string, defaultValue: T): T {
+  if (!fs.existsSync(filePath)) {
+    return defaultValue;
+  }
+
   try {
-    if (fs.existsSync(filePath)) {
-      const data = fs.readFileSync(filePath, 'utf-8');
-      return JSON.parse(data) as T;
-    }
+    const data = fs.readFileSync(filePath, 'utf-8');
+    return JSON.parse(data) as T;
   } catch (err) {
-    console.error(`Error reading ${filePath}:`, err);
+    // Preserve the unreadable file so it is never overwritten.
+    const backupPath = `${filePath}.corrupt-${Date.now()}`;
+
+    try {
+      fs.copyFileSync(filePath, backupPath);
+      console.error(
+        `Error reading ${filePath}. A copy was preserved at ${backupPath}.`,
+        err
+      );
+    } catch (copyErr) {
+      console.error(
+        `Error reading ${filePath} and failed to preserve a backup copy.`,
+        err,
+        copyErr
+      );
+
+      throw new Error(
+        `Refusing to continue: ${path.basename(filePath)} is unreadable and could not be backed up.`
+      );
+    }
   }
 
   return defaultValue;
 }
 
 function writeJsonFile<T>(filePath: string, data: T): void {
+  // Atomic write: write a temp file, then rename over the target.
+  const tempPath =
+    `${filePath}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+
   try {
+    ensureDataDir();
+
     fs.writeFileSync(
-      filePath,
+      tempPath,
       JSON.stringify(data, null, 2),
-      'utf-8'
+      { encoding: 'utf-8', mode: 0o600 }
     );
+
+    fs.renameSync(tempPath, filePath);
   } catch (err) {
     console.error(`Error writing ${filePath}:`, err);
+
+    try {
+      if (fs.existsSync(tempPath)) {
+        fs.unlinkSync(tempPath);
+      }
+    } catch {
+      // ignore
+    }
   }
 }
 
-let users: StoredUser[] = readJsonFile<StoredUser[]>(
-  USERS_FILE,
-  []
-);
+export function hashSessionToken(token: string): string {
+  return crypto
+    .createHash('sha256')
+    .update(token, 'utf8')
+    .digest('hex');
+}
 
-let sessions: StoredSession[] = readJsonFile<StoredSession[]>(
-  SESSIONS_FILE,
-  []
-);
+// Converts legacy sessions that stored the raw bearer token into
+// hashed sessions. The session stays valid for the same token.
+function normalizeSessions(raw: unknown): {
+  sessions: StoredSession[];
+  converted: boolean;
+} {
+  if (!Array.isArray(raw)) {
+    return { sessions: [], converted: false };
+  }
 
-let documents: StoredDocument[] = readJsonFile<StoredDocument[]>(
-  DOCUMENTS_FILE,
-  []
-);
+  let converted = false;
 
-let usageMap: Record<string, number> = readJsonFile<
-  Record<string, number>
->(
-  USAGE_FILE,
-  {}
-);
+  const result: StoredSession[] = [];
 
-const storedPurchases = readJsonFile<unknown>(
-  PURCHASES_FILE,
-  []
-);
+  for (const s of raw as any[]) {
+    if (!s || typeof s !== 'object') continue;
 
-let purchases: GooglePlayPurchaseRecord[] = Array.isArray(
-  storedPurchases
-)
-  ? (storedPurchases as GooglePlayPurchaseRecord[])
-  : [];
+    let tokenHash: string | undefined =
+      typeof s.tokenHash === 'string'
+        ? s.tokenHash
+        : undefined;
+
+    if (!tokenHash && typeof s.token === 'string' && s.token) {
+      tokenHash = hashSessionToken(s.token);
+      converted = true;
+    }
+
+    if (!tokenHash || typeof s.userId !== 'string') continue;
+
+    result.push({
+      tokenHash,
+      userId: s.userId,
+      createdAt: Number(s.createdAt) || 0,
+      expiresAt: Number(s.expiresAt) || 0,
+    });
+  }
+
+  return { sessions: result, converted };
+}
+
+let users: StoredUser[] = [];
+
+let sessions: StoredSession[] = [];
+
+let documents: StoredDocument[] = [];
+
+let usageMap: Record<string, number> = {};
+
+let purchases: GooglePlayPurchaseRecord[] = [];
+
+function loadJsonData(): {
+  users: StoredUser[];
+  sessions: StoredSession[];
+  sessionsConverted: boolean;
+  documents: StoredDocument[];
+  usage: Record<string, number>;
+  purchases: GooglePlayPurchaseRecord[];
+} {
+  const rawUsers = readJsonFile<unknown>(USERS_FILE, []);
+  const rawSessions = readJsonFile<unknown>(SESSIONS_FILE, []);
+  const rawDocuments = readJsonFile<unknown>(DOCUMENTS_FILE, []);
+  const rawUsage = readJsonFile<unknown>(USAGE_FILE, {});
+  const rawPurchases = readJsonFile<unknown>(PURCHASES_FILE, []);
+
+  const normalized = normalizeSessions(rawSessions);
+
+  return {
+    users: Array.isArray(rawUsers)
+      ? (rawUsers as StoredUser[])
+      : [],
+    sessions: normalized.sessions,
+    sessionsConverted: normalized.converted,
+    documents: Array.isArray(rawDocuments)
+      ? (rawDocuments as StoredDocument[])
+      : [],
+    usage:
+      rawUsage &&
+      typeof rawUsage === 'object' &&
+      !Array.isArray(rawUsage)
+        ? (rawUsage as Record<string, number>)
+        : {},
+    purchases: Array.isArray(rawPurchases)
+      ? (rawPurchases as GooglePlayPurchaseRecord[])
+      : [],
+  };
+}
+
+// -------------------------------------------------------------
+// PERSISTENCE HOOKS (JSON file or PostgreSQL write-through)
+// -------------------------------------------------------------
+
+function persistUser(user: StoredUser): void {
+  if (db) {
+    db.upsertUser(user);
+  } else {
+    writeJsonFile(USERS_FILE, users);
+  }
+}
+
+function persistUserDeletion(userId: string): void {
+  if (db) {
+    db.deleteUser(userId);
+  } else {
+    writeJsonFile(USERS_FILE, users);
+  }
+}
+
+function persistSessionInsert(session: StoredSession): void {
+  if (db) {
+    db.insertSession(session);
+  } else {
+    writeJsonFile(SESSIONS_FILE, sessions);
+  }
+}
+
+function persistSessionChanges(change: {
+  deletedTokenHash?: string;
+  expiredForUser?: { userId: string; now: number };
+  allForUser?: string;
+}): void {
+  if (db) {
+    if (change.deletedTokenHash) {
+      db.deleteSession(change.deletedTokenHash);
+    }
+
+    if (change.expiredForUser) {
+      db.deleteExpiredSessionsForUser(
+        change.expiredForUser.userId,
+        change.expiredForUser.now
+      );
+    }
+
+    if (change.allForUser) {
+      db.deleteSessionsForUser(change.allForUser);
+    }
+  } else {
+    writeJsonFile(SESSIONS_FILE, sessions);
+  }
+}
+
+function persistDocument(doc: StoredDocument): void {
+  if (db) {
+    db.upsertDocument(doc);
+  } else {
+    writeJsonFile(DOCUMENTS_FILE, documents);
+  }
+}
+
+function persistDocuments(docs: StoredDocument[]): void {
+  if (db) {
+    for (const doc of docs) {
+      db.upsertDocument(doc);
+    }
+  } else if (docs.length > 0) {
+    writeJsonFile(DOCUMENTS_FILE, documents);
+  }
+}
+
+function persistDocumentDeletion(
+  userId: string,
+  docId?: string
+): void {
+  if (db) {
+    if (docId) {
+      db.deleteDocument(userId, docId);
+    } else {
+      db.deleteDocumentsForUser(userId);
+    }
+  } else {
+    writeJsonFile(DOCUMENTS_FILE, documents);
+  }
+}
+
+function persistUsage(key: string, count: number): void {
+  if (db) {
+    db.upsertUsage(key, count);
+  } else {
+    writeJsonFile(USAGE_FILE, usageMap);
+  }
+}
+
+function persistPurchase(record: GooglePlayPurchaseRecord): void {
+  if (db) {
+    db.upsertPurchase(record);
+  } else {
+    writeJsonFile(PURCHASES_FILE, purchases);
+  }
+}
 
 // App owner & admin email
 export const OWNER_EMAIL = (
@@ -145,25 +373,190 @@ export function isUserAdmin(
 }
 
 // Only a Google-linked owner account can receive the owner admin role.
-const ownerUser = users.find(
-  (u) => u.email.trim().toLowerCase() === OWNER_EMAIL
-);
+function applyOwnerRoleRules(): void {
+  const ownerUser = users.find(
+    (u) => u.email?.trim().toLowerCase() === OWNER_EMAIL
+  );
 
-if (ownerUser) {
-  ownerUser.role = ownerUser.googleId ? 'admin' : 'user';
-  writeJsonFile(USERS_FILE, users);
+  if (ownerUser) {
+    const expectedRole =
+      ownerUser.googleId ? 'admin' : 'user';
+
+    if (ownerUser.role !== expectedRole) {
+      ownerUser.role = expectedRole;
+      persistUser(ownerUser);
+    }
+  }
 }
+
+// -------------------------------------------------------------
+// STORE INITIALISATION
+// -------------------------------------------------------------
+
+let storeInitialized = false;
+
+/**
+ * Must be awaited before the HTTP server starts listening.
+ */
+export async function initStore(): Promise<void> {
+  if (storeInitialized) return;
+
+  if (!DATABASE_URL) {
+    if (REQUIRE_DATABASE) {
+      throw new Error(
+        'REQUIRE_DATABASE=true but DATABASE_URL is not set. Refusing to start with temporary file storage.'
+      );
+    }
+
+    if (process.env.NODE_ENV === 'production') {
+      console.warn(
+        '[Store] WARNING: DATABASE_URL is not set. Using local JSON files under data/. ' +
+          'This storage is NOT permanent on Cloud Run and will be lost when the instance is replaced.'
+      );
+    }
+
+    ensureDataDir();
+
+    const loaded = loadJsonData();
+
+    users = loaded.users;
+    sessions = loaded.sessions;
+    documents = loaded.documents;
+    usageMap = loaded.usage;
+    purchases = loaded.purchases;
+
+    if (loaded.sessionsConverted) {
+      // Remove plaintext session tokens from disk.
+      writeJsonFile(SESSIONS_FILE, sessions);
+    }
+
+    applyOwnerRoleRules();
+
+    storeInitialized = true;
+
+    return;
+  }
+
+  db = new PostgresStore(DATABASE_URL);
+
+  await db.migrate();
+
+  // One-time import of any legacy JSON data present in data/.
+  // Existing database rows are never overwritten and the JSON
+  // files are left untouched.
+  const jsonFilesPresent = [
+    USERS_FILE,
+    SESSIONS_FILE,
+    DOCUMENTS_FILE,
+    USAGE_FILE,
+    PURCHASES_FILE,
+  ].some((f) => fs.existsSync(f));
+
+  if (jsonFilesPresent) {
+    const legacy = loadJsonData();
+
+    const result = await db.importJson(
+      `startup:${DATA_DIR}`,
+      {
+        users: legacy.users,
+        sessions: legacy.sessions,
+        documents: legacy.documents,
+        usage: legacy.usage,
+        purchases: legacy.purchases,
+      }
+    );
+
+    if (result.alreadyImported) {
+      console.log(
+        '[Store] Legacy JSON data was already imported previously; skipping.'
+      );
+    } else {
+      console.log(
+        '[Store] Imported legacy JSON data into PostgreSQL.',
+        { inserted: result.inserted, skipped: result.skipped }
+      );
+    }
+  }
+
+  const loaded = await db.loadAll();
+
+  users = loaded.users as StoredUser[];
+  sessions = loaded.sessions;
+  documents = loaded.documents as StoredDocument[];
+  usageMap = loaded.usage;
+  purchases = loaded.purchases as GooglePlayPurchaseRecord[];
+
+  applyOwnerRoleRules();
+
+  storeInitialized = true;
+
+  console.log(
+    `[Store] PostgreSQL storage ready (${users.length} users, ${documents.length} documents, ${purchases.length} purchases).`
+  );
+}
+
+/**
+ * Waits for all pending database writes. Call on shutdown.
+ */
+export async function flushStore(): Promise<void> {
+  if (db) {
+    await db.flush();
+  }
+}
+
+export function getStorageStatus(): {
+  backend: StorageBackendName;
+  pendingWrites: number;
+  failedWrites: number;
+} {
+  const status = db
+    ? db.getStatus()
+    : { pendingWrites: 0, failedWrites: 0 };
+
+  return {
+    backend: getStorageBackendName(),
+    ...status,
+  };
+}
+
+// -------------------------------------------------------------
+// PASSWORD HASHING
+// -------------------------------------------------------------
 
 const PASSWORD_HASH_ITERATIONS = 310000;
 const LEGACY_PASSWORD_HASH_ITERATIONS = 1000;
 const PASSWORD_HASH_KEY_LENGTH = 64;
 const PASSWORD_HASH_DIGEST = 'sha512';
+const PASSWORD_SALT_BYTES = 16;
+
+// Only these iteration counts are ever accepted.
+const ALLOWED_PASSWORD_HASH_ITERATIONS = new Set<number>([
+  LEGACY_PASSWORD_HASH_ITERATIONS,
+  PASSWORD_HASH_ITERATIONS,
+]);
+
+export const PASSWORD_MIN_LENGTH = 6;
+export const PASSWORD_MAX_LENGTH = 1024;
+
+const PASSWORD_HASH_HEX_PATTERN = new RegExp(
+  `^[0-9a-f]{${PASSWORD_HASH_KEY_LENGTH * 2}}$`,
+  'i'
+);
+
+const PASSWORD_SALT_HEX_PATTERN = new RegExp(
+  `^[0-9a-f]{${PASSWORD_SALT_BYTES * 2}}$`,
+  'i'
+);
 
 function hashPassword(
   password: string,
   salt: string,
   iterations: number = PASSWORD_HASH_ITERATIONS
 ): string {
+  if (!ALLOWED_PASSWORD_HASH_ITERATIONS.has(iterations)) {
+    throw new Error('Unsupported password hash configuration.');
+  }
+
   return crypto
     .pbkdf2Sync(
       password,
@@ -179,6 +572,13 @@ function isPasswordHashMatch(
   computedHash: string,
   storedHash: string
 ): boolean {
+  if (
+    !PASSWORD_HASH_HEX_PATTERN.test(computedHash) ||
+    !PASSWORD_HASH_HEX_PATTERN.test(storedHash)
+  ) {
+    return false;
+  }
+
   const computedBuffer =
     Buffer.from(computedHash, 'hex');
 
@@ -198,6 +598,28 @@ function isPasswordHashMatch(
     computedBuffer,
     storedBuffer
   );
+}
+
+/**
+ * Returns the iteration count for a stored hash, or null if the
+ * stored value is not one of the accepted configurations.
+ * Missing values are legacy 1,000-iteration hashes.
+ */
+function resolveStoredIterations(
+  user: StoredUser
+): number | null {
+  if (
+    user.passwordHashIterations === undefined ||
+    user.passwordHashIterations === null
+  ) {
+    return LEGACY_PASSWORD_HASH_ITERATIONS;
+  }
+
+  const value = Number(user.passwordHashIterations);
+
+  return ALLOWED_PASSWORD_HASH_ITERATIONS.has(value)
+    ? value
+    : null;
 }
 
 export function getTodayString(): string {
@@ -223,6 +645,16 @@ export function registerUser(
   }
 
   if (
+    typeof password !== 'string' ||
+    password.length < PASSWORD_MIN_LENGTH ||
+    password.length > PASSWORD_MAX_LENGTH
+  ) {
+    throw new Error(
+      `Password must be between ${PASSWORD_MIN_LENGTH} and ${PASSWORD_MAX_LENGTH} characters long.`
+    );
+  }
+
+  if (
     users.some(
       (u) => u.email.toLowerCase() === normalizedEmail
     )
@@ -233,7 +665,7 @@ export function registerUser(
   }
 
   const salt = crypto
-    .randomBytes(16)
+    .randomBytes(PASSWORD_SALT_BYTES)
     .toString('hex');
 
   const passwordHash = hashPassword(
@@ -244,7 +676,7 @@ export function registerUser(
 
   const newUser: StoredUser = {
     id: `user_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
-    name: name.trim() || 'User',
+    name: name.trim().slice(0, 100) || 'User',
     email: normalizedEmail,
     passwordHash,
     salt,
@@ -258,10 +690,7 @@ export function registerUser(
 
   users.push(newUser);
 
-  writeJsonFile(
-    USERS_FILE,
-    users
-  );
+  persistUser(newUser);
 
   const token = createSession(
     newUser.id
@@ -298,10 +727,32 @@ export function authenticateUser(
     );
   }
 
-  // Users without a stored iteration count have legacy 1,000-iteration hashes.
+  if (
+    typeof password !== 'string' ||
+    password.length === 0 ||
+    password.length > PASSWORD_MAX_LENGTH
+  ) {
+    throw new Error(
+      'Incorrect password. Please verify your credentials and try again.'
+    );
+  }
+
   const storedIterations =
-    user.passwordHashIterations ||
-    LEGACY_PASSWORD_HASH_ITERATIONS;
+    resolveStoredIterations(user);
+
+  if (
+    storedIterations === null ||
+    !PASSWORD_SALT_HEX_PATTERN.test(user.salt) ||
+    !PASSWORD_HASH_HEX_PATTERN.test(user.passwordHash)
+  ) {
+    console.error(
+      `[Auth] Stored password hash for user ${user.id} has an unsupported format; login rejected.`
+    );
+
+    throw new Error(
+      'Incorrect password. Please verify your credentials and try again.'
+    );
+  }
 
   const computedHash =
     hashPassword(
@@ -327,7 +778,7 @@ export function authenticateUser(
     PASSWORD_HASH_ITERATIONS
   ) {
     const newSalt = crypto
-      .randomBytes(16)
+      .randomBytes(PASSWORD_SALT_BYTES)
       .toString('hex');
 
     user.passwordHash =
@@ -342,10 +793,7 @@ export function authenticateUser(
     user.passwordHashIterations =
       PASSWORD_HASH_ITERATIONS;
 
-    writeJsonFile(
-      USERS_FILE,
-      users
-    );
+    persistUser(user);
   }
 
   const token =
@@ -403,10 +851,7 @@ export function findOrCreateGoogleUser(
         'google';
     }
 
-    writeJsonFile(
-      USERS_FILE,
-      users
-    );
+    persistUser(user);
   } else {
     user = {
       id: `user_g_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
@@ -435,10 +880,7 @@ export function findOrCreateGoogleUser(
 
     users.push(user);
 
-    writeJsonFile(
-      USERS_FILE,
-      users
-    );
+    persistUser(user);
   }
 
   const token =
@@ -450,38 +892,52 @@ export function findOrCreateGoogleUser(
   };
 }
 
+const SESSION_TTL_MS =
+  30 * 24 * 60 * 60 * 1000;
+
+// Session files were accidentally committed to the public
+// repository before this time. Any session created before it is
+// treated as compromised and rejected; users simply sign in again.
+const COMPROMISED_SESSION_CUTOFF_MS =
+  Date.parse('2026-10-02T06:46:02Z');
+
 export function createSession(
   userId: string
 ): string {
   const token =
     crypto.randomBytes(32).toString('hex');
 
+  const now = Date.now();
+
   const newSession:
     StoredSession = {
-    token,
+    tokenHash:
+      hashSessionToken(token),
     userId,
     createdAt:
-      Date.now(),
+      now,
     expiresAt:
-      Date.now() +
-      30 * 24 * 60 * 60 * 1000,
+      now +
+      SESSION_TTL_MS,
   };
 
   sessions =
     sessions.filter(
       (s) =>
         s.userId !== userId ||
-        s.expiresAt > Date.now()
+        s.expiresAt > now
     );
 
   sessions.push(
     newSession
   );
 
-  writeJsonFile(
-    SESSIONS_FILE,
-    sessions
-  );
+  if (db) {
+    db.deleteExpiredSessionsForUser(userId, now);
+    db.insertSession(newSession);
+  } else {
+    persistSessionInsert(newSession);
+  }
 
   return token;
 }
@@ -489,13 +945,25 @@ export function createSession(
 export function getUserByToken(
   token: string
 ): StoredUser | null {
-  if (!token) return null;
+  if (
+    !token ||
+    typeof token !== 'string' ||
+    token.length > 256
+  ) {
+    return null;
+  }
+
+  const tokenHash =
+    hashSessionToken(token);
+
+  const now = Date.now();
 
   const session =
     sessions.find(
       (s) =>
-        s.token === token &&
-        s.expiresAt > Date.now()
+        s.tokenHash === tokenHash &&
+        s.expiresAt > now &&
+        s.createdAt >= COMPROMISED_SESSION_CUTOFF_MS
     );
 
   if (!session) {
@@ -541,21 +1009,29 @@ export function updateUserProfile(
   if (
     updates.name !== undefined
   ) {
+    if (typeof updates.name !== 'string') {
+      throw new Error('Invalid name.');
+    }
+
     user.name =
-      updates.name.trim();
+      updates.name.trim().slice(0, 100);
   }
 
   if (
     updates.preferredLanguage !== undefined
   ) {
+    if (
+      typeof updates.preferredLanguage !== 'string' ||
+      updates.preferredLanguage.length > 50
+    ) {
+      throw new Error('Invalid preferred language.');
+    }
+
     user.preferredLanguage =
       updates.preferredLanguage;
   }
 
-  writeJsonFile(
-    USERS_FILE,
-    users
-  );
+  persistUser(user);
 
   return user;
 }
@@ -585,10 +1061,7 @@ export function updateUserPlan(
           365 * 86400000
       : undefined;
 
-  writeJsonFile(
-    USERS_FILE,
-    users
-  );
+  persistUser(user);
 
   return user;
 }
@@ -596,7 +1069,7 @@ export function updateUserPlan(
 export function getAllUsers(): Array<
   Omit<
     StoredUser,
-    'passwordHash' | 'salt'
+    'passwordHash' | 'salt' | 'passwordHashIterations'
   > & {
     isAdmin: boolean;
   }
@@ -629,16 +1102,22 @@ export function getAllUsers(): Array<
 export function invalidateSession(
   token: string
 ): void {
+  if (!token || typeof token !== 'string') {
+    return;
+  }
+
+  const tokenHash =
+    hashSessionToken(token);
+
   sessions =
     sessions.filter(
       (s) =>
-        s.token !== token
+        s.tokenHash !== tokenHash
     );
 
-  writeJsonFile(
-    SESSIONS_FILE,
-    sessions
-  );
+  persistSessionChanges({
+    deletedTokenHash: tokenHash,
+  });
 }
 
 export function deleteUserAccount(
@@ -661,25 +1140,44 @@ export function deleteUserAccount(
         d.userId !== userId
     );
 
-  writeJsonFile(
-    USERS_FILE,
-    users
-  );
+  persistUserDeletion(userId);
 
-  writeJsonFile(
-    SESSIONS_FILE,
-    sessions
-  );
+  persistSessionChanges({
+    allForUser: userId,
+  });
 
-  writeJsonFile(
-    DOCUMENTS_FILE,
-    documents
-  );
+  persistDocumentDeletion(userId);
 }
 
 // -------------------------------------------------------------
 // DOCUMENT STORAGE & SYNC
 // -------------------------------------------------------------
+
+export const MAX_DOCUMENT_CONTENT_LENGTH = 2_000_000;
+export const MAX_SYNC_DOCUMENTS = 500;
+
+function sanitizeText(
+  value: unknown,
+  maxLength: number
+): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  return value.slice(0, maxLength);
+}
+
+function sanitizeDocumentId(value: unknown): string | undefined {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > 128
+  ) {
+    return undefined;
+  }
+
+  return value;
+}
 
 export function getUserDocuments(
   userId: string
@@ -709,8 +1207,17 @@ export function saveUserDocument(
     timestamp?: number;
   }
 ): StoredDocument {
+  if (
+    typeof doc.fullContent !== 'string' ||
+    doc.fullContent.length > MAX_DOCUMENT_CONTENT_LENGTH
+  ) {
+    throw new Error(
+      'Document content is invalid or too large.'
+    );
+  }
+
   const docId =
-    doc.id ||
+    sanitizeDocumentId(doc.id) ||
     `doc_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
 
   const existingIdx =
@@ -722,7 +1229,7 @@ export function saveUserDocument(
     );
 
   const snippet =
-    doc.snippet ||
+    sanitizeText(doc.snippet, 500) ||
     doc.fullContent.replace(
       /\n+/g,
       ' '
@@ -734,23 +1241,25 @@ export function saveUserDocument(
     id: docId,
     userId,
     title:
-      doc.title ||
+      sanitizeText(doc.title, 300) ||
       'Untitled Document',
     type:
-      doc.type ||
+      sanitizeText(doc.type, 50) ||
       'home',
     snippet,
     fullContent:
       doc.fullContent,
     timestamp:
-      doc.timestamp ||
-      Date.now(),
+      Number.isFinite(Number(doc.timestamp)) &&
+      Number(doc.timestamp) > 0
+        ? Number(doc.timestamp)
+        : Date.now(),
     isFavorite:
       Boolean(
         doc.isFavorite
       ),
     category:
-      doc.category ||
+      sanitizeText(doc.category, 100) ||
       'General',
   };
 
@@ -764,10 +1273,7 @@ export function saveUserDocument(
     );
   }
 
-  writeJsonFile(
-    DOCUMENTS_FILE,
-    documents
-  );
+  persistDocument(newDoc);
 
   return newDoc;
 }
@@ -799,8 +1305,12 @@ export function updateUserDocument(
     updates.title !==
     undefined
   ) {
+    if (typeof updates.title !== 'string') {
+      throw new Error('Invalid document title.');
+    }
+
     doc.title =
-      updates.title.trim();
+      updates.title.trim().slice(0, 300);
   }
 
   if (
@@ -808,21 +1318,22 @@ export function updateUserDocument(
     undefined
   ) {
     doc.isFavorite =
-      updates.isFavorite;
+      Boolean(updates.isFavorite);
   }
 
   if (
     updates.category !==
     undefined
   ) {
+    if (typeof updates.category !== 'string') {
+      throw new Error('Invalid document category.');
+    }
+
     doc.category =
-      updates.category;
+      updates.category.slice(0, 100);
   }
 
-  writeJsonFile(
-    DOCUMENTS_FILE,
-    documents
-  );
+  persistDocument(doc);
 
   return doc;
 }
@@ -841,10 +1352,7 @@ export function deleteUserDocument(
         )
     );
 
-  writeJsonFile(
-    DOCUMENTS_FILE,
-    documents
-  );
+  persistDocumentDeletion(userId, docId);
 }
 
 export function clearUserDocuments(
@@ -856,10 +1364,7 @@ export function clearUserDocuments(
         d.userId !== userId
     );
 
-  writeJsonFile(
-    DOCUMENTS_FILE,
-    documents
-  );
+  persistDocumentDeletion(userId);
 }
 
 export function syncUserDocuments(
@@ -875,36 +1380,52 @@ export function syncUserDocuments(
     category?: string;
   }>
 ): StoredDocument[] {
+  const added: StoredDocument[] = [];
+
   for (
-    const clientDoc of clientDocs
+    const clientDoc of clientDocs.slice(0, MAX_SYNC_DOCUMENTS)
   ) {
+    if (
+      !clientDoc ||
+      typeof clientDoc !== 'object' ||
+      typeof clientDoc.fullContent !== 'string' ||
+      clientDoc.fullContent.length === 0 ||
+      clientDoc.fullContent.length > MAX_DOCUMENT_CONTENT_LENGTH
+    ) {
+      continue;
+    }
+
+    const clientId =
+      sanitizeDocumentId(clientDoc.id);
+
     const existing =
       documents.find(
         (d) =>
           d.userId ===
             userId &&
           (
-            d.id ===
-              clientDoc.id ||
+            (clientId !== undefined &&
+              d.id ===
+                clientId) ||
             d.fullContent ===
               clientDoc.fullContent
           )
       );
 
     if (!existing) {
-      documents.unshift({
+      const newDoc: StoredDocument = {
         id:
-          clientDoc.id ||
+          clientId ||
           `doc_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
         userId,
         title:
-          clientDoc.title ||
+          sanitizeText(clientDoc.title, 300) ||
           'Saved Document',
         type:
-          clientDoc.type ||
+          sanitizeText(clientDoc.type, 50) ||
           'home',
         snippet:
-          clientDoc.snippet ||
+          sanitizeText(clientDoc.snippet, 500) ||
           clientDoc.fullContent.slice(
             0,
             100
@@ -912,23 +1433,26 @@ export function syncUserDocuments(
         fullContent:
           clientDoc.fullContent,
         timestamp:
-          clientDoc.timestamp ||
-          Date.now(),
+          Number.isFinite(Number(clientDoc.timestamp)) &&
+          Number(clientDoc.timestamp) > 0
+            ? Number(clientDoc.timestamp)
+            : Date.now(),
         isFavorite:
           Boolean(
             clientDoc.isFavorite
           ),
         category:
-          clientDoc.category ||
+          sanitizeText(clientDoc.category, 100) ||
           'General',
-      });
+      };
+
+      documents.unshift(newDoc);
+
+      added.push(newDoc);
     }
   }
 
-  writeJsonFile(
-    DOCUMENTS_FILE,
-    documents
-  );
+  persistDocuments(added);
 
   return getUserDocuments(
     userId
@@ -950,6 +1474,17 @@ const ipRequestCounts =
       resetAt: number;
     }
   >();
+
+// Periodically drop expired rate-limit buckets to bound memory use.
+setInterval(() => {
+  const now = Date.now();
+
+  for (const [key, record] of ipRequestCounts.entries()) {
+    if (now > record.resetAt) {
+      ipRequestCounts.delete(key);
+    }
+  }
+}, RATE_LIMIT_WINDOW_MS).unref();
 
 export function checkRateLimit(
   ip: string,
@@ -1073,10 +1608,7 @@ export function incrementDailyUsage(
   usageMap[key] =
     current + 1;
 
-  writeJsonFile(
-    USAGE_FILE,
-    usageMap
-  );
+  persistUsage(key, usageMap[key]);
 
   return usageMap[key];
 }
@@ -1145,6 +1677,13 @@ export function recordGooglePlayPurchase(
     );
 
   if (idx >= 0) {
+    // A purchase token can never be moved to a different account.
+    if (purchases[idx].userId !== record.userId) {
+      throw new Error(
+        'This Google Play purchase token is already linked to another account.'
+      );
+    }
+
     purchases[idx] =
       record;
   } else {
@@ -1153,10 +1692,7 @@ export function recordGooglePlayPurchase(
     );
   }
 
-  writeJsonFile(
-    PURCHASES_FILE,
-    purchases
-  );
+  persistPurchase(record);
 
   return record;
 }

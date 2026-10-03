@@ -46,6 +46,28 @@ class MainActivity : AppCompatActivity() {
     private val appAssetUrl =
         "https://appassets.androidplatform.net/assets/public/index.html"
 
+    companion object {
+        const val TRUSTED_APP_HOST =
+            "appassets.androidplatform.net"
+
+        fun isTrustedAppUrl(url: Uri?): Boolean {
+            return url != null &&
+                url.scheme == "https" &&
+                url.host == TRUSTED_APP_HOST &&
+                (url.path ?: "").startsWith("/assets/public/")
+        }
+
+        fun isTrustedAppUrl(url: String?): Boolean {
+            if (url.isNullOrBlank()) return false
+
+            return try {
+                isTrustedAppUrl(Uri.parse(url))
+            } catch (_: Exception) {
+                false
+            }
+        }
+    }
+
     private val requestPermissionLauncher =
         registerForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions()
@@ -489,6 +511,40 @@ class MainActivity : AppCompatActivity() {
                     val url =
                         request.url
 
+                    // Only the bundled app may load inside the WebView,
+                    // because it exposes native JavaScript bridges.
+                    if (isTrustedAppUrl(url)) {
+                        return false
+                    }
+
+                    if (
+                        url.scheme == "https" ||
+                        url.scheme == "http"
+                    ) {
+
+                        try {
+
+                            startActivity(
+                                Intent(
+                                    Intent.ACTION_VIEW,
+                                    url
+                                ).addCategory(
+                                    Intent.CATEGORY_BROWSABLE
+                                )
+                            )
+
+                        } catch (e: Exception) {
+
+                            Log.e(
+                                tag,
+                                "Unable to open external URL",
+                                e
+                            )
+                        }
+
+                        return true
+                    }
+
                     if (
                         url.scheme == "mailto" ||
                         url.scheme == "tel"
@@ -518,7 +574,8 @@ class MainActivity : AppCompatActivity() {
                         return true
                     }
 
-                    return false
+                    // Block every other scheme (intent:, file:, javascript:, ...).
+                    return true
                 }
             }
     }

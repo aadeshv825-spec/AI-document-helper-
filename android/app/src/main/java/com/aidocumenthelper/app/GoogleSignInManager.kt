@@ -43,12 +43,17 @@ class GoogleSignInManager(
         activity.runOnUiThread {
             scope.launch {
                 try {
+                    // Always use the app's own server client ID; never one
+                    // supplied by page JavaScript.
                     val clientId =
-                        if (!webClientId.isNullOrBlank()) {
-                            webClientId
-                        } else {
-                            activity.getString(R.string.default_web_client_id)
-                        }
+                        activity.getString(R.string.default_web_client_id)
+
+                    if (
+                        !webClientId.isNullOrBlank() &&
+                        webClientId != clientId
+                    ) {
+                        Log.w(tag, "Ignoring unexpected web client ID from page")
+                    }
 
                     val rawNonce = UUID.randomUUID().toString()
 
@@ -310,7 +315,12 @@ class GoogleSignInManager(
             """.trimIndent()
 
         activity.runOnUiThread {
-            webView.evaluateJavascript(js, null)
+            // Deliver ID tokens only to the bundled app page.
+            if (MainActivity.isTrustedAppUrl(webView.url)) {
+                webView.evaluateJavascript(js, null)
+            } else {
+                Log.w(tag, "Refusing to deliver Google credential to untrusted page")
+            }
         }
     }
 

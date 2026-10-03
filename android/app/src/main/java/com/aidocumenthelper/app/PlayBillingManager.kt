@@ -318,6 +318,12 @@ class PlayBillingManager(
         }
 
         activity.runOnUiThread {
+            // Deliver purchase tokens only to the bundled app page.
+            if (!MainActivity.isTrustedAppUrl(webView.url)) {
+                Log.w(tag, "Refusing to deliver purchase to untrusted page")
+                return@runOnUiThread
+            }
+
             val script =
                 "if (window.onGooglePlayPurchaseCompleted) { " +
                 "window.onGooglePlayPurchaseCompleted($payload); }"

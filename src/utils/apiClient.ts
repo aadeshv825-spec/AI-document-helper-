@@ -4,8 +4,15 @@
 const TOKEN_KEY = 'ai_doc_auth_token';
 const CLIENT_ID_KEY = 'ai_doc_client_id';
 
-const API_BASE_URL =
+// Override at build time with VITE_API_BASE_URL (e.g. the production
+// Cloud Run URL). Falls back to the current backend URL.
+const DEFAULT_API_BASE_URL =
   'https://ais-dev-gq2p2ijj6ei7rg6rotit6q-119321813297.asia-southeast1.run.app';
+
+const API_BASE_URL = (
+  (import.meta as any).env?.VITE_API_BASE_URL ||
+  DEFAULT_API_BASE_URL
+).replace(/\/$/, '');
 
 function buildApiUrl(endpoint: string): string {
   if (/^https?:\/\//i.test(endpoint)) {

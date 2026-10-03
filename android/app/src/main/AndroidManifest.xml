@@ -11,10 +11,9 @@
     <!-- Google Play In-App Billing -->
     <uses-permission android:name="com.android.vending.BILLING" />
 
-    <!-- Storage / Media permissions for scanning & PDF exports -->
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" tools:ignore="ScopedStorage" />
+    <!-- No broad storage/media permissions are needed: files are picked via the
+         system picker (ACTION_GET_CONTENT) and camera captures are written to
+         app-specific storage shared through FileProvider. -->
 
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
