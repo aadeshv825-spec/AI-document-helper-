@@ -38,6 +38,10 @@ import {
   flushStore,
   PASSWORD_MIN_LENGTH,
   PASSWORD_MAX_LENGTH,
+  findUserByEmail,
+  setUserPassword,
+  verifyUserPassword,
+  createSession,
 } from './server/store.ts';
 
 dotenv.config();
@@ -53,7 +57,7 @@ app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
 app.use(express.json({ limit: '30mb' }));
-app.use(express.urlencoded({ extended: true, limit: '30mb' }));
+app.use(express.urlencoded({ extended: false, limit: '100kb' }));
 
 // Basic security headers
 app.use((req, res, next) => {
@@ -129,6 +133,8 @@ const SENSITIVE_RATE_LIMITS: Array<{
 }> = [
   { prefix: '/api/auth/login', limit: 20 },
   { prefix: '/api/auth/register', limit: 10 },
+  { prefix: '/api/auth/password-reset', limit: 5 },
+  { prefix: '/api/auth/change-password', limit: 10 },
   { prefix: '/api/auth/google', limit: 30 },
   { prefix: '/api/billing/google-play/verify-purchase', limit: 20 },
   { prefix: '/api/billing/google-play/restore-purchases', limit: 20 },
@@ -283,7 +289,7 @@ function checkAiUsage(
 
     res.status(429).json({
       error:
-        'Daily free limit reached (5/5). Upgrade to Pro or start your 30-day trial for unlimited AI actions.',
+        'Daily free limit reached (5/5). Upgrade to Pro for unlimited AI actions, or try again tomorrow.',
       isLimitReached: true,
       usage: currentUsage,
     });
@@ -353,6 +359,174 @@ function parseJsonFromText(rawText: string): any {
 
     return null;
   }
+}
+
+// -------------------------------------------------------------
+// AI request input validation
+// -------------------------------------------------------------
+
+class AiInputError extends Error {
+  status: number;
+
+  constructor(message: string, status = 400) {
+    super(message);
+    this.status = status;
+  }
+}
+
+// Gemini inline requests are limited to ~20 MB in total. Keep the
+// decoded file comfortably below that.
+const MAX_INLINE_FILE_BYTES = 15 * 1024 * 1024;
+
+// Upper bounds for text sent to AI endpoints.
+const MAX_AI_DOCUMENT_CHARS = 2_000_000;
+const MAX_TRANSLATION_CHARS = 20_000;
+
+const ALLOWED_IMAGE_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/webp',
+  'image/heic',
+  'image/heif',
+]);
+
+const ALLOWED_DOCUMENT_MIME_TYPES = new Set([
+  'application/pdf',
+  'text/plain',
+  ...ALLOWED_IMAGE_MIME_TYPES,
+]);
+
+function optionalString(
+  value: unknown,
+  field: string,
+  maxLength: number,
+  fallback = ''
+): string {
+  if (value === undefined || value === null) return fallback;
+
+  if (typeof value !== 'string') {
+    throw new AiInputError(`Invalid ${field}.`);
+  }
+
+  if (value.length > maxLength) {
+    throw new AiInputError(
+      `${field} is too long (maximum ${maxLength.toLocaleString('en-US')} characters).`,
+      413
+    );
+  }
+
+  return value;
+}
+
+function pickAllowed<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  fallback: T
+): T {
+  return typeof value === 'string' &&
+    (allowed as readonly string[]).includes(value)
+    ? (value as T)
+    : fallback;
+}
+
+// Parses an optional data URI / raw base64 payload and validates its
+// type and decoded size. Returns null when no file was provided.
+function parseInlineFile(
+  value: unknown,
+  declaredMime: unknown,
+  allowedTypes: Set<string>,
+  fallbackMime: string
+): { data: string; mimeType: string } | null {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+
+  if (typeof value !== 'string') {
+    throw new AiInputError('Invalid file data.');
+  }
+
+  let data = value;
+  let mimeType =
+    typeof declaredMime === 'string' && declaredMime
+      ? declaredMime
+      : fallbackMime;
+
+  const dataUriMatch = value.match(
+    /^data:([^;,]+)(?:;[^,]*)?;base64,/
+  );
+
+  if (dataUriMatch) {
+    mimeType = dataUriMatch[1];
+    data = value.slice(dataUriMatch[0].length);
+  }
+
+  mimeType = mimeType.trim().toLowerCase();
+
+  if (!allowedTypes.has(mimeType)) {
+    throw new AiInputError(
+      'Unsupported file type. Please upload a PDF or an image (JPG, PNG, WebP or HEIC).',
+      415
+    );
+  }
+
+  data = data.replace(/\s+/g, '');
+
+  if (!data || !/^[A-Za-z0-9+/]+={0,2}$/.test(data)) {
+    throw new AiInputError('The uploaded file data is corrupted or incomplete.');
+  }
+
+  const decodedBytes = Math.floor((data.length * 3) / 4);
+
+  if (decodedBytes > MAX_INLINE_FILE_BYTES) {
+    throw new AiInputError(
+      'File is too large. Please upload a file smaller than 15 MB.',
+      413
+    );
+  }
+
+  return {
+    data,
+    mimeType: mimeType === 'image/jpg' ? 'image/jpeg' : mimeType,
+  };
+}
+
+// Converts endpoint errors into safe client responses. Validation
+// errors keep their message; unexpected errors are logged and a generic
+// message is returned so internal details are not exposed.
+function sendAiError(
+  res: express.Response,
+  route: string,
+  err: any,
+  fallbackMessage: string
+) {
+  if (err instanceof AiInputError) {
+    return res.status(err.status).json({
+      error: err.message,
+    });
+  }
+
+  console.error(`Error in ${route}:`, err?.message || err);
+
+  const message = String(err?.message || '');
+
+  if (message.includes('GEMINI_API_KEY')) {
+    return res.status(503).json({
+      error:
+        'The AI service is not configured on the server yet. Please try again later.',
+    });
+  }
+
+  if (/timed out/i.test(message)) {
+    return res.status(504).json({
+      error:
+        'The AI service took too long to respond. Please try again.',
+    });
+  }
+
+  return res.status(502).json({
+    error: fallbackMessage,
+  });
 }
 
 // Resilient helper with dynamic model selection and silent fallback
@@ -431,41 +605,32 @@ app.post('/api/photo-to-text', async (req, res) => {
   if (!authCtx) return;
 
   try {
-    const {
-      imageBase64,
-      mimeType = 'image/jpeg',
-      promptHint = '',
-    } = req.body;
+    const body = req.body || {};
 
-    if (!imageBase64 && !promptHint) {
+    const promptHint = optionalString(
+      body.promptHint,
+      'Instructions',
+      1000
+    ).trim();
+
+    const image = parseInlineFile(
+      body.imageBase64,
+      body.mimeType,
+      ALLOWED_DOCUMENT_MIME_TYPES,
+      'image/jpeg'
+    );
+
+    if (!image) {
       return res.status(400).json({
         error: 'Please provide an image or document photo.',
       });
     }
 
-    let cleanBase64 = imageBase64 || '';
-    let detectedMime = mimeType;
-
-    const dataUriMatch =
-      imageBase64?.match(
-        /^data:([^;]+);base64,(.+)$/
-      );
-
-    if (dataUriMatch) {
-      detectedMime = dataUriMatch[1];
-      cleanBase64 = dataUriMatch[2];
-    }
-
-    const parts: any[] = [];
-
-    if (cleanBase64) {
-      parts.push({
-        inlineData: {
-          data: cleanBase64,
-          mimeType: detectedMime || 'image/jpeg',
-        },
-      });
-    }
+    const parts: any[] = [
+      {
+        inlineData: image,
+      },
+    ];
 
     parts.push({
       text: `You are an expert document OCR and data extraction system.
@@ -548,16 +713,12 @@ Respond STRICTLY with valid JSON in this exact structure:
       structuredDetails: [],
     });
   } catch (err: any) {
-    console.error(
-      'Error in /api/photo-to-text:',
-      err
+    sendAiError(
+      res,
+      '/api/photo-to-text',
+      err,
+      'Failed to process document photo. Please verify image clarity and try again.'
     );
-
-    res.status(500).json({
-      error:
-        err.message ||
-        'Failed to process document photo. Please verify image clarity and try again.',
-    });
   }
 });
 
@@ -571,18 +732,32 @@ app.post('/api/pdf-summary', async (req, res) => {
   if (!authCtx) return;
 
   try {
-    const {
-      documentText,
-      fileBase64,
-      mimeType = 'application/pdf',
-      title = 'Document',
-      language = 'English',
-    } = req.body;
+    const body = req.body || {};
 
-    if (
-      (!documentText || !documentText.trim()) &&
-      !fileBase64
-    ) {
+    const documentText = optionalString(
+      body.documentText,
+      'Document text',
+      MAX_AI_DOCUMENT_CHARS
+    );
+
+    const title =
+      optionalString(body.title, 'Title', 300).trim() ||
+      'Document';
+
+    const language = pickAllowed(
+      body.language,
+      ['English', 'Hindi'] as const,
+      'English'
+    );
+
+    const file = parseInlineFile(
+      body.fileBase64,
+      body.mimeType,
+      ALLOWED_DOCUMENT_MIME_TYPES,
+      'application/pdf'
+    );
+
+    if (!documentText.trim() && !file) {
       return res.status(400).json({
         error:
           'Please provide document text or upload a file to summarize.',
@@ -591,27 +766,14 @@ app.post('/api/pdf-summary', async (req, res) => {
 
     const parts: any[] = [];
 
-    if (fileBase64) {
-      let cleanBase64 = fileBase64;
-      let actualMime = mimeType;
-
-      const dataUriMatch =
-        fileBase64.match(
-          /^data:([^;]+);base64,(.+)$/
-        );
-
-      if (dataUriMatch) {
-        actualMime = dataUriMatch[1];
-        cleanBase64 = dataUriMatch[2];
-      }
-
+    if (file) {
       parts.push({
-        inlineData: {
-          data: cleanBase64,
-          mimeType: actualMime,
-        },
+        inlineData: file,
       });
     }
+
+    const textTruncated =
+      documentText.length > 45000;
 
     const promptInstructions = `You are a premier executive document analyst. Analyze this document thoroughly and generate a crisp, highly actionable summary in ${language}.
 Document Title/Context: ${title}
@@ -662,10 +824,23 @@ Output STRICTLY valid JSON with this exact schema:
     incrementDailyUsage(authCtx.identifier);
 
     if (parsed && parsed.summary) {
-      return res.json(parsed);
+      // The app renders these as lists; never send a missing or non-array value.
+      const toStringList = (value: unknown): string[] =>
+        Array.isArray(value)
+          ? value.filter((item) => typeof item === 'string')
+          : [];
+
+      return res.json({
+        ...parsed,
+        keyPoints: toStringList(parsed.keyPoints),
+        actionItems: toStringList(parsed.actionItems),
+        importantDatesOrNumbers: toStringList(parsed.importantDatesOrNumbers),
+        truncated: textTruncated,
+      });
     }
 
     return res.json({
+      truncated: textTruncated,
       title: title || 'Document Summary',
       summary: response.text || 'Summary generated.',
       keyPoints: [],
@@ -673,16 +848,12 @@ Output STRICTLY valid JSON with this exact schema:
       importantDatesOrNumbers: [],
     });
   } catch (err: any) {
-    console.error(
-      'Error in /api/pdf-summary:',
-      err
+    sendAiError(
+      res,
+      '/api/pdf-summary',
+      err,
+      'Failed to summarize document. Please ensure document contents are readable.'
     );
-
-    res.status(500).json({
-      error:
-        err.message ||
-        'Failed to summarize document. Please ensure document contents are readable.',
-    });
   }
 });
 
@@ -696,22 +867,27 @@ app.post('/api/ask-document', async (req, res) => {
   if (!authCtx) return;
 
   try {
-    const {
-      documentContext,
-      question,
-      conversation = [],
-    } = req.body;
+    const body = req.body || {};
 
-    if (!question || !question.trim()) {
+    const question = optionalString(
+      body.question,
+      'Question',
+      2000
+    );
+
+    const documentContext = optionalString(
+      body.documentContext,
+      'Document',
+      MAX_AI_DOCUMENT_CHARS
+    );
+
+    if (!question.trim()) {
       return res.status(400).json({
         error: 'Please enter a question to ask.',
       });
     }
 
-    if (
-      !documentContext ||
-      !documentContext.trim()
-    ) {
+    if (!documentContext.trim()) {
       return res.status(400).json({
         error:
           'Document context is required to answer questions.',
@@ -758,8 +934,14 @@ Return STRICTLY valid JSON:
 
     incrementDailyUsage(authCtx.identifier);
 
+    const contextTruncated =
+      documentContext.length > 40000;
+
     if (parsed && parsed.answer) {
-      return res.json(parsed);
+      return res.json({
+        ...parsed,
+        truncated: contextTruncated,
+      });
     }
 
     return res.json({
@@ -769,18 +951,15 @@ Return STRICTLY valid JSON:
 
       relevantExcerpts: [],
       suggestedQuestions: [],
+      truncated: contextTruncated,
     });
   } catch (err: any) {
-    console.error(
-      'Error in /api/ask-document:',
-      err
+    sendAiError(
+      res,
+      '/api/ask-document',
+      err,
+      'Failed to answer question on document.'
     );
-
-    res.status(500).json({
-      error:
-        err.message ||
-        'Failed to answer question on document.',
-    });
   }
 });
 
@@ -794,13 +973,29 @@ app.post('/api/hindi-translation', async (req, res) => {
   if (!authCtx) return;
 
   try {
-    const {
-      text,
-      sourceLang = 'Auto',
-      targetLang = 'Hindi',
-    } = req.body;
+    const body = req.body || {};
 
-    if (!text || !text.trim()) {
+    // Translation output must be complete, so oversized input is
+    // rejected instead of being silently cut.
+    const text = optionalString(
+      body.text,
+      'Text to translate',
+      MAX_TRANSLATION_CHARS
+    );
+
+    const sourceLang = pickAllowed(
+      body.sourceLang,
+      ['Auto', 'English', 'Hindi'] as const,
+      'Auto'
+    );
+
+    const targetLang = pickAllowed(
+      body.targetLang,
+      ['Hindi', 'English'] as const,
+      'Hindi'
+    );
+
+    if (!text.trim()) {
       return res.status(400).json({
         error: 'Please provide text to translate.',
       });
@@ -847,7 +1042,10 @@ Output STRICTLY valid JSON:
     incrementDailyUsage(authCtx.identifier);
 
     if (parsed && parsed.translatedText) {
-      return res.json(parsed);
+      return res.json({
+        ...parsed,
+        glossary: Array.isArray(parsed.glossary) ? parsed.glossary : [],
+      });
     }
 
     return res.json({
@@ -857,16 +1055,12 @@ Output STRICTLY valid JSON:
       glossary: [],
     });
   } catch (err: any) {
-    console.error(
-      'Error in /api/hindi-translation:',
-      err
+    sendAiError(
+      res,
+      '/api/hindi-translation',
+      err,
+      'Failed to translate document text.'
     );
-
-    res.status(500).json({
-      error:
-        err.message ||
-        'Failed to translate document text.',
-    });
   }
 });
 
@@ -880,14 +1074,30 @@ app.post('/api/ai-writer', async (req, res) => {
   if (!authCtx) return;
 
   try {
-    const {
-      docType = 'Formal Letter',
-      topic = '',
-      keyPoints = '',
-      recipient = '',
-      tone = 'Formal & Respectful',
-      language = 'English',
-    } = req.body;
+    const body = req.body || {};
+
+    const docType =
+      optionalString(body.docType, 'Document type', 120).trim() ||
+      'Formal Letter';
+    const topic = optionalString(body.topic, 'Topic', 2000);
+    const keyPoints = optionalString(
+      body.keyPoints,
+      'Key points',
+      10000
+    );
+    const recipient = optionalString(
+      body.recipient,
+      'Recipient',
+      500
+    );
+    const tone =
+      optionalString(body.tone, 'Tone', 120).trim() ||
+      'Formal & Respectful';
+    const language = pickAllowed(
+      body.language,
+      ['English', 'Hindi'] as const,
+      'English'
+    );
 
     if (
       !topic.trim() &&
@@ -940,7 +1150,12 @@ Return STRICTLY valid JSON:
     incrementDailyUsage(authCtx.identifier);
 
     if (parsed && parsed.content) {
-      return res.json(parsed);
+      return res.json({
+        ...parsed,
+        tips: Array.isArray(parsed.tips)
+          ? parsed.tips.filter((tip: unknown) => typeof tip === 'string')
+          : [],
+      });
     }
 
     return res.json({
@@ -951,16 +1166,12 @@ Return STRICTLY valid JSON:
       ],
     });
   } catch (err: any) {
-    console.error(
-      'Error in /api/ai-writer:',
-      err
+    sendAiError(
+      res,
+      '/api/ai-writer',
+      err,
+      'Failed to draft document with AI.'
     );
-
-    res.status(500).json({
-      error:
-        err.message ||
-        'Failed to draft document with AI.',
-    });
   }
 });
 
@@ -974,13 +1185,20 @@ app.post('/api/quick-action', async (req, res) => {
   if (!authCtx) return;
 
   try {
-    const {
-      action,
-      text,
-      title = 'Document',
-    } = req.body;
+    const body = req.body || {};
+    const action = body.action;
 
-    if (!text || !text.trim()) {
+    const text = optionalString(
+      body.text,
+      'Text',
+      MAX_AI_DOCUMENT_CHARS
+    );
+
+    const title =
+      optionalString(body.title, 'Title', 300).trim() ||
+      'Document';
+
+    if (!text.trim()) {
       return res.status(400).json({
         error:
           'Text content is required for quick action.',
@@ -1100,16 +1318,12 @@ Return STRICTLY valid JSON:
       },
     });
   } catch (err: any) {
-    console.error(
-      'Error in /api/quick-action:',
-      err
+    sendAiError(
+      res,
+      '/api/quick-action',
+      err,
+      'Failed to execute quick action.'
     );
-
-    res.status(500).json({
-      error:
-        err.message ||
-        'Failed to execute quick action.',
-    });
   }
 });
 
@@ -1134,6 +1348,8 @@ function serializeUser(user: StoredUser) {
     authProvider:
       user.authProvider ||
       (user.googleId ? 'google' : 'password'),
+    // Lets the app offer "Change password" only to accounts that have one.
+    hasPassword: Boolean(user.passwordHash && user.salt),
   };
 }
 
@@ -2081,7 +2297,91 @@ app.get(
 // AUTH ME / PROFILE / LOGOUT / DELETE
 // =============================================================
 
-app.get('/api/auth/me', (req, res) => {
+// Google Play renews subscriptions without the app being involved, so
+// when a verified subscription's stored expiry has passed, re-check it
+// with Google before treating the user as Free. Attempts are throttled
+// per user and failures never remove access that Google still reports.
+const entitlementRefreshAttempts = new Map<string, number>();
+
+async function refreshExpiredGooglePlayEntitlement(
+  user: StoredUser
+): Promise<void> {
+  const now = Date.now();
+
+  if (
+    user.plan === 'pro' &&
+    (user.proUntil == null || user.proUntil > now)
+  ) {
+    return;
+  }
+
+  const staleRecords = getUserGooglePlayPurchases(user.id)
+    .filter(
+      (p) =>
+        p.state === 'VERIFIED' &&
+        typeof p.expiryTime === 'number' &&
+        p.expiryTime <= now
+    )
+    .sort((a, b) => (b.expiryTime || 0) - (a.expiryTime || 0))
+    .slice(0, 5);
+
+  if (staleRecords.length === 0) {
+    return;
+  }
+
+  const lastAttempt = entitlementRefreshAttempts.get(user.id) || 0;
+
+  if (now - lastAttempt < 10 * 60 * 1000) {
+    return;
+  }
+
+  entitlementRefreshAttempts.set(user.id, now);
+
+  for (const record of staleRecords) {
+    const result = await verifyGooglePlaySubscriptionForUser(
+      record.purchaseToken,
+      user
+    );
+
+    if (result.status === 'active') {
+      updateUserPlan(user.id, 'pro', result.record.expiryTime);
+      return;
+    }
+
+    if (result.status === 'inactive') {
+      try {
+        recordGooglePlayPurchase({
+          ...record,
+          state: 'EXPIRED',
+          verifiedAt: Date.now(),
+        });
+      } catch (markErr) {
+        console.error(
+          '[Google Play Billing] Failed to mark purchase inactive:',
+          markErr
+        );
+      }
+    }
+  }
+}
+
+app.get('/api/auth/me', async (req, res) => {
+  const sessionToken = getTokenFromRequest(req);
+  const sessionUser = sessionToken
+    ? getUserByToken(sessionToken)
+    : null;
+
+  if (sessionUser) {
+    try {
+      await refreshExpiredGooglePlayEntitlement(sessionUser);
+    } catch (refreshErr: any) {
+      console.error(
+        '[Google Play Billing] Entitlement refresh failed:',
+        refreshErr?.message || refreshErr
+      );
+    }
+  }
+
   const {
     user,
     identifier,
@@ -2147,6 +2447,375 @@ app.put('/api/auth/profile', (req, res) => {
         'Failed to update profile.',
     });
   }
+});
+
+// =============================================================
+// PASSWORD CHANGE & EMAIL PASSWORD RESET
+// =============================================================
+
+app.post('/api/auth/change-password', (req, res) => {
+  const { user } = getAuthContext(req);
+
+  if (!user) {
+    return res.status(401).json({
+      error: 'Please sign in again.',
+    });
+  }
+
+  const { currentPassword, newPassword } = req.body || {};
+
+  if (!user.passwordHash || !user.salt) {
+    return res.status(400).json({
+      error:
+        'This account signs in with Google, so it has no password to change.',
+    });
+  }
+
+  if (!verifyUserPassword(user.id, currentPassword)) {
+    return res.status(400).json({
+      error: 'Your current password is incorrect.',
+    });
+  }
+
+  try {
+    setUserPassword(user.id, newPassword);
+
+    // All old sessions were revoked; issue a fresh one for this device.
+    const token = createSession(user.id);
+
+    res.json({
+      success: true,
+      token,
+      user: serializeUser(user),
+      message:
+        'Password changed. Other devices have been signed out.',
+    });
+  } catch (err: any) {
+    res.status(400).json({
+      error: err.message || 'Failed to change password.',
+    });
+  }
+});
+
+const PASSWORD_RESET_TTL_MS = 30 * 60 * 1000;
+const PASSWORD_RESET_EMAIL_INTERVAL_MS = 2 * 60 * 1000;
+
+// Reset tokens are single-use and kept only in memory as SHA-256
+// hashes. A restart invalidates outstanding links; users simply
+// request a new one.
+const passwordResetTokens = new Map<
+  string,
+  { userId: string; expiresAt: number }
+>();
+
+const passwordResetLastSent = new Map<string, number>();
+
+setInterval(() => {
+  const now = Date.now();
+
+  for (const [hash, data] of passwordResetTokens.entries()) {
+    if (data.expiresAt <= now) {
+      passwordResetTokens.delete(hash);
+    }
+  }
+
+  for (const [email, sentAt] of passwordResetLastSent.entries()) {
+    if (now - sentAt > PASSWORD_RESET_EMAIL_INTERVAL_MS) {
+      passwordResetLastSent.delete(email);
+    }
+  }
+}, 5 * 60 * 1000).unref?.();
+
+function hashResetToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function getPasswordResetConfig(): {
+  apiKey: string;
+  from: string;
+  appUrl: string;
+} | null {
+  const apiKey = (process.env.RESEND_API_KEY || '').trim();
+  const from = (process.env.PASSWORD_RESET_EMAIL_FROM || '').trim();
+  const appUrl = (process.env.APP_URL || '').trim().replace(/\/$/, '');
+
+  // APP_URL is required so reset links are never built from the
+  // request Host header (host-header poisoning).
+  if (!apiKey || !from || !/^https:\/\//i.test(appUrl)) {
+    return null;
+  }
+
+  return { apiKey, from, appUrl };
+}
+
+async function sendPasswordResetEmail(
+  to: string,
+  name: string,
+  resetUrl: string,
+  config: { apiKey: string; from: string }
+): Promise<void> {
+  const safeName = escapeHtml(name || 'there');
+  const safeUrl = escapeHtml(resetUrl);
+
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from: config.from,
+      to: [to],
+      subject: 'Reset your AI Document Helper password',
+      text:
+        `Hi ${name || 'there'},\n\n` +
+        `Use this link to set a new password for AI Document Helper. ` +
+        `It expires in 30 minutes and can be used once:\n\n${resetUrl}\n\n` +
+        `If you did not request this, you can ignore this email.`,
+      html:
+        `<p>Hi ${safeName},</p>` +
+        `<p>Use the link below to set a new password for AI Document Helper. It expires in 30 minutes and can be used once.</p>` +
+        `<p><a href="${safeUrl}">Reset my password</a></p>` +
+        `<p>If you did not request this, you can ignore this email.</p>`,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `Email provider returned status ${response.status}`
+    );
+  }
+}
+
+app.get('/api/auth/password-reset/status', (req, res) => {
+  res.json({
+    available: Boolean(getPasswordResetConfig()),
+  });
+});
+
+app.post('/api/auth/password-reset/request', async (req, res) => {
+  const config = getPasswordResetConfig();
+
+  if (!config) {
+    return res.status(503).json({
+      error:
+        'Password reset by email is not available yet. Please sign in with Google if your account uses the same Gmail address, or contact support.',
+    });
+  }
+
+  const email =
+    typeof req.body?.email === 'string'
+      ? req.body.email.trim().toLowerCase()
+      : '';
+
+  if (!email || email.length > 254 || !EMAIL_PATTERN.test(email)) {
+    return res.status(400).json({
+      error: 'Please enter a valid email address.',
+    });
+  }
+
+  // The response is identical whether or not the account exists, so
+  // this endpoint cannot be used to discover registered emails.
+  const genericResponse = {
+    success: true,
+    message:
+      'If an account exists for this email, a password reset link has been sent. Please check your inbox and spam folder.',
+  };
+
+  const user = findUserByEmail(email);
+
+  const lastSent = passwordResetLastSent.get(email) || 0;
+
+  if (
+    !user ||
+    user.email.toLowerCase() === OWNER_EMAIL ||
+    Date.now() - lastSent < PASSWORD_RESET_EMAIL_INTERVAL_MS
+  ) {
+    return res.json(genericResponse);
+  }
+
+  passwordResetLastSent.set(email, Date.now());
+
+  // Only one active reset link per user.
+  for (const [hash, data] of passwordResetTokens.entries()) {
+    if (data.userId === user.id) {
+      passwordResetTokens.delete(hash);
+    }
+  }
+
+  const token = crypto.randomBytes(32).toString('hex');
+
+  passwordResetTokens.set(hashResetToken(token), {
+    userId: user.id,
+    expiresAt: Date.now() + PASSWORD_RESET_TTL_MS,
+  });
+
+  // The token is placed in the URL fragment so it is not sent to the
+  // server or proxies when the page loads.
+  const resetUrl = `${config.appUrl}/reset-password#token=${token}`;
+
+  try {
+    await sendPasswordResetEmail(user.email, user.name, resetUrl, config);
+  } catch (err: any) {
+    console.error(
+      '[PasswordReset] Failed to send reset email:',
+      err?.message || err
+    );
+
+    passwordResetTokens.delete(hashResetToken(token));
+    passwordResetLastSent.delete(email);
+
+    return res.status(502).json({
+      error:
+        'We could not send the reset email right now. Please try again later.',
+    });
+  }
+
+  res.json(genericResponse);
+});
+
+app.post('/api/auth/password-reset/confirm', (req, res) => {
+  const { token, newPassword } = req.body || {};
+
+  if (typeof token !== 'string' || !/^[0-9a-f]{64}$/.test(token)) {
+    return res.status(400).json({
+      error: 'This reset link is invalid or has expired.',
+    });
+  }
+
+  const tokenHash = hashResetToken(token);
+  const entry = passwordResetTokens.get(tokenHash);
+
+  if (!entry || entry.expiresAt <= Date.now()) {
+    passwordResetTokens.delete(tokenHash);
+
+    return res.status(400).json({
+      error: 'This reset link is invalid or has expired.',
+    });
+  }
+
+  try {
+    setUserPassword(entry.userId, newPassword);
+  } catch (err: any) {
+    // Keep the token so the user can retry with a valid password.
+    return res.status(400).json({
+      error: err.message || 'Failed to reset password.',
+    });
+  }
+
+  passwordResetTokens.delete(tokenHash);
+
+  res.json({
+    success: true,
+    message:
+      'Your password has been reset. You can now sign in with your new password.',
+  });
+});
+
+app.get('/reset-password', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Frame-Options', 'DENY');
+
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Reset Password - AI Document Helper</title>
+    <style>
+      body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; background:#0f172a; color:#f8fafc; font-family:-apple-system,Segoe UI,Roboto,sans-serif; padding:16px; box-sizing:border-box; }
+      .card { width:100%; max-width:380px; background:#1e293b; border:1px solid #334155; border-radius:14px; padding:24px; box-sizing:border-box; }
+      h1 { font-size:18px; margin:0 0 6px; }
+      p { font-size:13px; color:#94a3b8; margin:0 0 16px; line-height:1.5; }
+      label { display:block; font-size:12px; color:#cbd5e1; margin:12px 0 6px; }
+      input { width:100%; box-sizing:border-box; padding:10px 12px; border-radius:10px; border:1px solid #475569; background:#0f172a; color:#f8fafc; font-size:14px; }
+      button { margin-top:18px; width:100%; padding:11px; border:0; border-radius:10px; background:#2563eb; color:#fff; font-weight:600; font-size:14px; cursor:pointer; }
+      button:disabled { opacity:.6; cursor:default; }
+      .msg { margin-top:14px; font-size:13px; line-height:1.5; }
+      .error { color:#fca5a5; }
+      .ok { color:#86efac; }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Set a new password</h1>
+      <p>Choose a new password for your AI Document Helper account. All devices will be signed out.</p>
+      <form id="reset-form" novalidate>
+        <label for="pw">New password</label>
+        <input id="pw" type="password" autocomplete="new-password" minlength="${PASSWORD_MIN_LENGTH}" maxlength="${PASSWORD_MAX_LENGTH}" required />
+        <label for="pw2">Confirm new password</label>
+        <input id="pw2" type="password" autocomplete="new-password" minlength="${PASSWORD_MIN_LENGTH}" maxlength="${PASSWORD_MAX_LENGTH}" required />
+        <button id="submit" type="submit">Reset password</button>
+      </form>
+      <div id="msg" class="msg" role="status" aria-live="polite"></div>
+    </main>
+    <script>
+      (function () {
+        var minLength = ${PASSWORD_MIN_LENGTH};
+        var match = /(?:^|[#&])token=([0-9a-f]{64})/.exec(window.location.hash || '');
+        var token = match ? match[1] : '';
+        var form = document.getElementById('reset-form');
+        var msg = document.getElementById('msg');
+        var btn = document.getElementById('submit');
+
+        function show(text, ok) {
+          msg.textContent = text;
+          msg.className = 'msg ' + (ok ? 'ok' : 'error');
+        }
+
+        if (!token) {
+          form.style.display = 'none';
+          show('This reset link is invalid or incomplete. Please request a new one from the app.', false);
+          return;
+        }
+
+        // Remove the token from the address bar and history.
+        try { history.replaceState(null, '', window.location.pathname); } catch (e) {}
+
+        form.addEventListener('submit', function (event) {
+          event.preventDefault();
+          var pw = document.getElementById('pw').value;
+          var pw2 = document.getElementById('pw2').value;
+
+          if (pw.length < minLength) {
+            show('Password must be at least ' + minLength + ' characters long.', false);
+            return;
+          }
+
+          if (pw !== pw2) {
+            show('The passwords do not match.', false);
+            return;
+          }
+
+          btn.disabled = true;
+          show('Saving...', true);
+
+          fetch('/api/auth/password-reset/confirm', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: token, newPassword: pw })
+          })
+            .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+            .then(function (result) {
+              if (result.ok) {
+                form.style.display = 'none';
+                show(result.data.message || 'Your password has been reset.', true);
+              } else {
+                btn.disabled = false;
+                show(result.data.error || 'Failed to reset password.', false);
+              }
+            })
+            .catch(function () {
+              btn.disabled = false;
+              show('Network error. Please check your connection and try again.', false);
+            });
+        });
+      })();
+    </script>
+  </body>
+</html>`);
 });
 
 app.post('/api/auth/logout', (req, res) => {
@@ -3490,6 +4159,48 @@ app.post(
 // The public Android project archive endpoint was removed because the
 // archive contained signing material. Android releases are built from
 // source by the GitHub Actions release workflow.
+
+// Unknown API routes must return JSON instead of falling through to
+// the single-page app's index.html.
+app.all('/api/*', (req, res) => {
+  res.status(404).json({
+    error: 'API endpoint not found.',
+  });
+});
+
+// Body parser and unexpected route errors are returned as JSON so the
+// app can show a meaningful message.
+app.use(
+  (
+    err: any,
+    req: express.Request,
+    res: express.Response,
+    next: express.NextFunction
+  ) => {
+    if (res.headersSent) {
+      return next(err);
+    }
+
+    if (err?.type === 'entity.too.large') {
+      return res.status(413).json({
+        error:
+          'The uploaded file or text is too large. Please use a smaller file.',
+      });
+    }
+
+    if (err?.type === 'entity.parse.failed') {
+      return res.status(400).json({
+        error: 'Invalid request body.',
+      });
+    }
+
+    console.error('[Server] Unhandled request error:', err?.message || err);
+
+    res.status(500).json({
+      error: 'Something went wrong. Please try again.',
+    });
+  }
+);
 
 // =============================================================
 // VITE SERVER

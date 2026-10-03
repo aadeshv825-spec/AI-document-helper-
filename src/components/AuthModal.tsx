@@ -17,7 +17,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   onSuccess,
   defaultMode = 'login',
 }) => {
-  const { login, register, signInWithGoogle } = useAuth();
+  const { login, register, signInWithGoogle, requestPasswordReset } = useAuth();
   const [mode, setMode] = useState<'login' | 'register'>(defaultMode);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -26,8 +26,29 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
+  const [resetLoading, setResetLoading] = useState(false);
 
   if (!isOpen) return null;
+
+  const handleForgotPassword = async () => {
+    setError(null);
+    setNotice(null);
+
+    if (!email.trim()) {
+      setError('Please enter your email address above, then tap "Forgot Password?" again.');
+      return;
+    }
+
+    setResetLoading(true);
+    const res = await requestPasswordReset(email.trim());
+    setResetLoading(false);
+
+    if (res.success) {
+      setNotice(res.message || 'If an account exists for this email, a password reset link has been sent.');
+    } else {
+      setError(res.error || 'Could not request a password reset.');
+    }
+  };
 
   const handleGoogleClick = async () => {
     setError(null);
@@ -227,16 +248,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   {mode === 'login' && (
                     <button
                       type="button"
-                      onClick={() => {
-                        if (email.trim()) {
-                          setError(`Password reset instructions have been dispatched to ${email.trim()}. Please check your inbox.`);
-                        } else {
-                          setError('Please enter your email address above to receive password reset instructions.');
-                        }
-                      }}
-                      className="text-[11px] text-blue-400 hover:text-blue-300 transition-colors"
+                      onClick={handleForgotPassword}
+                      disabled={resetLoading}
+                      className="text-[11px] text-blue-400 hover:text-blue-300 transition-colors disabled:opacity-50"
                     >
-                      Forgot Password?
+                      {resetLoading ? 'Sending...' : 'Forgot Password?'}
                     </button>
                   )}
                 </div>

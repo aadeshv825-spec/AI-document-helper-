@@ -1,5 +1,5 @@
 
-const CACHE_NAME = 'dochelper-v2.5';
+const CACHE_NAME = 'dochelper-v3';
 
 const APP_BASE_URL = self.registration.scope;
 
@@ -63,20 +63,54 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Cache-first with background updates.
+  // Only handle this app's own files. Google Sign-In, fonts and other
+  // third-party requests go straight to the network.
+  if (url.origin !== self.location.origin) {
+    return;
+  }
+
+  // Pages that must always be fresh and never cached.
+  if (url.pathname.endsWith('/reset-password')) {
+    return;
+  }
+
+  // Pages (index.html): network first so a new release is picked up
+  // immediately; fall back to the cached copy when offline.
+  if (request.mode === 'navigate' || url.pathname.endsWith('.html') || url.pathname.endsWith('/')) {
+    event.respondWith(
+      fetch(request)
+        .then((networkResponse) => {
+          if (networkResponse && networkResponse.status === 200 && networkResponse.type === 'basic') {
+            const responseToCache = networkResponse.clone();
+            caches.open(CACHE_NAME).then((cache) => {
+              cache.put(request, responseToCache);
+            });
+          }
+
+          return networkResponse;
+        })
+        .catch(() => {
+          return caches.match(request).then((cachedResponse) => {
+            if (cachedResponse) return cachedResponse;
+
+            const fallbackUrl = new URL('index.html', APP_BASE_URL).toString();
+            return caches.match(fallbackUrl).then((fallback) => {
+              return fallback || new Response('Offline', {
+                status: 503,
+                statusText: 'Service Unavailable'
+              });
+            });
+          });
+        })
+    );
+
+    return;
+  }
+
+  // Build assets have content hashes in their names, so cache-first is safe.
   event.respondWith(
     caches.match(request).then((cachedResponse) => {
       if (cachedResponse) {
-        fetch(request)
-          .then((networkResponse) => {
-            if (networkResponse && networkResponse.status === 200) {
-              caches.open(CACHE_NAME).then((cache) => {
-                cache.put(request, networkResponse.clone());
-              });
-            }
-          })
-          .catch(() => {});
-
         return cachedResponse;
       }
 
@@ -99,15 +133,6 @@ self.addEventListener('fetch', (event) => {
           return networkResponse;
         })
         .catch(() => {
-          if (request.mode === 'navigate') {
-            const fallbackUrl = new URL(
-              'index.html',
-              APP_BASE_URL
-            ).toString();
-
-            return caches.match(fallbackUrl);
-          }
-
           return new Response('Offline', {
             status: 503,
             statusText: 'Service Unavailable'

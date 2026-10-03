@@ -17,7 +17,8 @@ import {
   CheckCircle,
 } from 'lucide-react';
 import { DocumentHistoryItem, DOCUMENT_CATEGORIES } from '../types';
-import { shareDocumentContent } from '../utils/share';
+import { shareDocumentContent, copyTextToClipboard } from '../utils/share';
+import { downloadTextFile, sanitizeFileName } from '../utils/download';
 import { useAuth } from '../context/AuthContext';
 
 interface HistoryDrawerProps {
@@ -49,6 +50,7 @@ export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [sharedId, setSharedId] = useState<string | null>(null);
   const [downloadedId, setDownloadedId] = useState<string | null>(null);
+  const [confirmClearAll, setConfirmClearAll] = useState(false);
 
   // Inline rename state
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
@@ -82,7 +84,7 @@ export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({
   const handleCopy = async (e: React.MouseEvent, item: DocumentHistoryItem) => {
     e.stopPropagation();
     try {
-      await navigator.clipboard.writeText(item.fullContent);
+      if (!(await copyTextToClipboard(item.fullContent))) throw new Error('Copy failed');
       setCopiedId(item.id);
       setTimeout(() => setCopiedId(null), 2000);
     } catch {
@@ -104,15 +106,7 @@ export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({
 
   const handleDownload = (e: React.MouseEvent, item: DocumentHistoryItem) => {
     e.stopPropagation();
-    const blob = new Blob([item.fullContent], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${item.title.replace(/[^a-zA-Z0-9_-]/g, '_') || 'document'}.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    void downloadTextFile(item.fullContent, `${sanitizeFileName(item.title)}.txt`);
     setDownloadedId(item.id);
     setTimeout(() => setDownloadedId(null), 2000);
   };
@@ -424,12 +418,35 @@ export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({
             <span className="text-[11px] text-slate-500">
               Showing {filteredHistory.length} of {history.length} documents
             </span>
-            <button
-              onClick={onClear}
-              className="text-xs text-rose-400 hover:text-rose-300 flex items-center gap-1 font-medium transition-colors"
-            >
-              <Trash2 className="w-3.5 h-3.5" /> Clear All
-            </button>
+            {!confirmClearAll ? (
+              <button
+                onClick={() => setConfirmClearAll(true)}
+                className="text-xs text-rose-400 hover:text-rose-300 flex items-center gap-1 font-medium transition-colors"
+              >
+                <Trash2 className="w-3.5 h-3.5" /> Clear All
+              </button>
+            ) : (
+              <div className="flex items-center gap-2" role="alertdialog" aria-label="Confirm clearing all documents">
+                <span className="text-[11px] text-rose-300">
+                  {user ? 'Delete all documents from this device and your account?' : 'Delete all documents?'}
+                </span>
+                <button
+                  onClick={() => setConfirmClearAll(false)}
+                  className="text-xs text-slate-300 hover:text-white px-2 py-1 rounded-md bg-slate-800"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    setConfirmClearAll(false);
+                    onClear();
+                  }}
+                  className="text-xs text-white font-semibold px-2 py-1 rounded-md bg-rose-600 hover:bg-rose-500"
+                >
+                  Delete
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>

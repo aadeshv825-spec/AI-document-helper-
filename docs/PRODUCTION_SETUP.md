@@ -55,6 +55,16 @@ until reads are moved to direct database queries. Pending writes are flushed on
 | `REQUIRE_DATABASE` | `true` in production |
 | `ALLOWED_ORIGINS` | Optional extra CORS origins |
 | `VITE_API_BASE_URL` | Optional build-time backend URL for the frontend |
+| `RESEND_API_KEY` | Resend API key used to send password reset emails (Secret Manager). Without it, "Forgot password" honestly reports that email reset is unavailable. |
+| `PASSWORD_RESET_EMAIL_FROM` | Sender address on a domain verified in Resend, e.g. `AI Document Helper <no-reply@yourdomain.com>` |
+
+Password reset notes:
+
+- `APP_URL` must be an `https://` URL; reset links point to `APP_URL/reset-password`.
+- Reset tokens are single-use, valid for 30 minutes, and stored (hashed) in
+  server memory, so a restart invalidates outstanding links. This matches the
+  single-instance requirement above.
+- The owner account cannot be reset by email.
 
 The Cloud Run service account also needs access to the Google Play Developer
 API (Play Console > Users and permissions) for purchase verification.

@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 import { PdfSummaryResponse, ActiveTab } from '../types';
 import { SAMPLE_DOCUMENTS } from '../data/sampleDocuments';
-import { shareDocumentContent } from '../utils/share';
+import { shareDocumentContent, copyTextToClipboard } from '../utils/share';
 import { downloadTextFile } from '../utils/download';
 import { QuickActionsBar } from './QuickActionsBar';
 import { apiFetch } from '../utils/apiClient';
@@ -61,13 +61,29 @@ export const PdfSummaryTool: React.FC<PdfSummaryProps> = ({
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    // Allow selecting the same file again later.
+    e.target.value = '';
     if (!file) return;
+
+    const lowerName = file.name.toLowerCase();
+    const isPdf = file.type === 'application/pdf' || lowerName.endsWith('.pdf');
+    const isText =
+      file.type.startsWith('text/') || /\.(txt|md|csv)$/.test(lowerName);
+
+    if (!isPdf && !isText) {
+      setError('Please upload a PDF or a plain text file (.txt, .md, .csv). For Word files, save them as PDF first.');
+      return;
+    }
+
+    // The server accepts files up to 15 MB.
+    if (file.size > 15 * 1024 * 1024) {
+      setError('This file is larger than 15 MB. Please upload a smaller file or split the PDF first.');
+      return;
+    }
 
     setDocTitle(file.name.replace(/\.[^/.]+$/, ''));
     setError(null);
     setSummaryData(null);
-
-    const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
 
     if (isPdf) {
       const reader = new FileReader();
@@ -76,6 +92,7 @@ export const PdfSummaryTool: React.FC<PdfSummaryProps> = ({
         setPdfBase64(base64String);
         setDocText(`[PDF Attached: ${file.name} - ${(file.size / 1024).toFixed(1)} KB]`);
       };
+      reader.onerror = () => setError('Could not read this file. Please try again.');
       reader.readAsDataURL(file);
     } else {
       setPdfBase64(null);
@@ -84,6 +101,7 @@ export const PdfSummaryTool: React.FC<PdfSummaryProps> = ({
         const content = event.target?.result as string;
         setDocText(content || '');
       };
+      reader.onerror = () => setError('Could not read this file. Please try again.');
       reader.readAsText(file);
     }
   };
@@ -156,9 +174,12 @@ export const PdfSummaryTool: React.FC<PdfSummaryProps> = ({
   const handleCopySummary = () => {
     if (!summaryData) return;
     const formatted = `=== ${summaryData.title} ===\n\n${summaryData.summary}\n\nKEY HIGHLIGHTS:\n${summaryData.keyPoints.map((p) => `• ${p}`).join('\n')}\n\nACTION ITEMS:\n${summaryData.actionItems.map((a) => `[ ] ${a}`).join('\n')}`;
-    navigator.clipboard.writeText(formatted);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    copyTextToClipboard(formatted).then((ok) => {
+      if (ok) {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      }
+    });
   };
 
   const handleShareSummary = async () => {
@@ -195,13 +216,13 @@ export const PdfSummaryTool: React.FC<PdfSummaryProps> = ({
         <div className="p-3 bg-amber-500/15 border border-amber-500/40 rounded-xl flex items-center justify-between gap-3 text-xs text-amber-200 shadow-xs">
           <div className="flex items-center gap-2">
             <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
-            <span>Daily free limit reached (5/5). Start 30-day Pro trial for unlimited scans.</span>
+            <span>Daily free limit reached (5/5). Upgrade to Pro for unlimited scans, or try again tomorrow.</span>
           </div>
           <button
             onClick={onOpenPro}
             className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-xs shrink-0 transition-colors shadow-sm"
           >
-            Start Trial
+            Upgrade
           </button>
         </div>
       )}
@@ -223,7 +244,7 @@ export const PdfSummaryTool: React.FC<PdfSummaryProps> = ({
           <input
             id="pdf-file-upload"
             type="file"
-            accept=".txt,.pdf,.doc,.docx,.csv"
+            accept=".txt,.md,.csv,.pdf,text/plain,application/pdf"
             onChange={handleFileUpload}
             className="hidden"
           />
@@ -306,6 +327,11 @@ export const PdfSummaryTool: React.FC<PdfSummaryProps> = ({
       {/* Summary Output */}
       {summaryData && (
         <div className="bg-slate-800/70 border border-slate-700 rounded-xl p-4 space-y-4 shadow-sm">
+          {summaryData.truncated && (
+            <p role="note" className="p-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200">
+              This document is very long, so only the first part was summarized.
+            </p>
+          )}
           {/* Header & Controls */}
           <div className="flex items-start justify-between gap-2 border-b border-slate-700/60 pb-3">
             <div>

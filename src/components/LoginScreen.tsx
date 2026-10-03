@@ -4,7 +4,7 @@ import { Lock, Mail, User, ShieldCheck, ArrowRight, Loader2, Chrome, AlertCircle
 import { useAuth } from '../context/AuthContext';
 
 export const LoginScreen: React.FC = () => {
-  const { login, register, signInWithGoogle } = useAuth();
+  const { login, register, signInWithGoogle, requestPasswordReset } = useAuth();
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -76,12 +76,25 @@ export const LoginScreen: React.FC = () => {
     }
   };
 
-  const handleForgotPassword = () => {
+  const [resetLoading, setResetLoading] = useState(false);
+
+  const handleForgotPassword = async () => {
     setError(null);
-    if (email.trim()) {
-      setNotice(`Password reset instructions have been dispatched to ${email.trim()}. Please check your inbox.`);
+    setNotice(null);
+
+    if (!email.trim()) {
+      setError('Please enter your email address above, then tap "Forgot Password?" again.');
+      return;
+    }
+
+    setResetLoading(true);
+    const res = await requestPasswordReset(email.trim());
+    setResetLoading(false);
+
+    if (res.success) {
+      setNotice(res.message || 'If an account exists for this email, a password reset link has been sent.');
     } else {
-      setError('Please enter your email address above to receive password reset instructions.');
+      setError(res.error || 'Could not request a password reset.');
     }
   };
 
@@ -201,7 +214,7 @@ export const LoginScreen: React.FC = () => {
                   id="input-name"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="e.g. Aadesh V"
+                  placeholder="Your full name"
                   required={mode === 'register'}
                   className="w-full bg-slate-800/90 border border-slate-700/80 rounded-xl pl-9 pr-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                 />
@@ -237,9 +250,10 @@ export const LoginScreen: React.FC = () => {
                   type="button"
                   id="btn-forgot-password"
                   onClick={handleForgotPassword}
-                  className="text-[11px] text-blue-400 hover:text-blue-300 transition-colors"
+                  disabled={resetLoading}
+                  className="text-[11px] text-blue-400 hover:text-blue-300 transition-colors disabled:opacity-50"
                 >
-                  Forgot Password?
+                  {resetLoading ? 'Sending...' : 'Forgot Password?'}
                 </button>
               )}
             </div>

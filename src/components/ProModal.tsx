@@ -21,11 +21,13 @@ import {
 } from 'lucide-react';
 import { PlanTier } from '../types';
 import { useAuth } from '../context/AuthContext';
+import { copyTextToClipboard } from '../utils/share';
 import {
   PLAY_STORE_SKUS,
   isAndroidPlayStoreEnvironment,
   initiatePlayPurchase,
   PlayStoreSku,
+  getPlayProductPrices,
 } from '../utils/playBilling';
 
 interface ProModalProps {
@@ -57,12 +59,27 @@ export const ProModal: React.FC<ProModalProps> = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const isPro = plan === 'pro';
-  const isAdmin = Boolean(user?.isAdmin || user?.email?.toLowerCase() === 'aadeshv825@gmail.com');
+  // Admin status is decided by the server only.
+  const isAdmin = Boolean(user?.isAdmin);
   const OWNER_EMAIL = 'aadeshv825@gmail.com';
   const isPlayEnv = isAndroidPlayStoreEnvironment();
 
   const selectedSku: PlayStoreSku =
     billingCycle === 'annual' ? PLAY_STORE_SKUS.ANNUAL : PLAY_STORE_SKUS.MONTHLY;
+
+  // Prefer the localized prices configured in Google Play; fall back to
+  // the published prices when they are not available (e.g. on the web).
+  const [playPrices, setPlayPrices] = useState<Partial<Record<PlayStoreSku, string>>>({});
+
+  useEffect(() => {
+    if (isOpen && isPlayEnv) {
+      setPlayPrices(getPlayProductPrices());
+    }
+  }, [isOpen, isPlayEnv]);
+
+  const displayPrice =
+    playPrices[selectedSku] || (billingCycle === 'annual' ? '₹699' : '₹99');
+  const hasPlayPrice = Boolean(playPrices[selectedSku]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -77,7 +94,7 @@ export const ProModal: React.FC<ProModalProps> = ({
   if (!isOpen) return null;
 
   const handleCopyEmail = () => {
-    navigator.clipboard.writeText(OWNER_EMAIL);
+    void copyTextToClipboard(OWNER_EMAIL);
     setCopiedEmail(true);
     setTimeout(() => setCopiedEmail(false), 2000);
   };
@@ -129,43 +146,38 @@ export const ProModal: React.FC<ProModalProps> = ({
       setTimeout(() => {
         onClose();
       }, 1800);
+    } else if (result.success) {
+      // Request worked but no active subscription exists: not an error,
+      // but also not a success.
+      setErrorMessage(result.message || 'No active Google Play subscription was found for this account.');
     } else {
-      setStatusMessage(result.message || 'No active Google Play subscription found for this account.');
+      setErrorMessage(result.message || 'Could not restore purchases. Please check your connection and try again.');
     }
   };
 
   const benefits = [
     {
       icon: InfinityIcon,
-      title: 'Unlimited Daily Processing',
-      description: 'Never worry about daily limits. Scan, extract, and translate as many documents as you need.',
+      title: 'Unlimited Daily AI Actions',
+      description: 'No 5-per-day limit on Photo to Text, PDF Summary, Ask Document, Translation and AI Writer (fair-use limits apply).',
     },
     {
       icon: Zap,
-      title: 'Priority Gemini AI Engine',
-      description: 'Faster response times with priority routing and automatic multi-model failover.',
-    },
-    {
-      icon: FileCheck2,
-      title: 'High-Accuracy Document OCR',
-      description: 'Extract multi-page agreements, messy bills, and Devanagari Hindi script with pinpoint precision.',
+      title: 'Work Without Interruptions',
+      description: 'Process long documents and multiple files in one session without waiting for the daily reset.',
     },
     {
       icon: Share2,
-      title: 'One-Tap Mobile Sharing',
-      description: 'Export structured briefs directly to WhatsApp, Gmail, Slack, or Google Drive via native share.',
-    },
-    {
-      icon: Star,
-      title: 'Unlimited Starred Vault',
-      description: 'Save contracts, leases, and receipts to your Favorites with offline search.',
+      title: 'Pro on Every Device',
+      description: 'Your Pro plan is linked to your account, so it is available wherever you sign in.',
     },
     {
       icon: ShieldCheck,
-      title: 'Private & Secure Processing',
-      description: 'Client-side image compression and zero persistent storage of sensitive credentials.',
+      title: 'Cancel Anytime',
+      description: 'Manage or cancel your subscription in Google Play at any time. Purchases are verified securely with Google.',
     },
   ];
+
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
@@ -279,20 +291,22 @@ export const ProModal: React.FC<ProModalProps> = ({
             <div>
               <div className="flex items-baseline gap-1.5">
                 <span className="text-xl sm:text-2xl font-bold text-slate-100">
-                  {billingCycle === 'annual' ? '₹699' : '₹99'}
+                  {displayPrice}
                 </span>
                 <span className="text-xs text-slate-400">
-                  {billingCycle === 'annual' ? '/ year (₹58/mo)' : '/ month'}
+                  {billingCycle === 'annual'
+                    ? hasPlayPrice ? '/ year' : '/ year (about ₹58/mo)'
+                    : '/ month'}
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 mt-0.5">
-                Google Play Store In-App Billing &bull; SKU: <span className="font-mono text-slate-300">{selectedSku}</span>
+                Billed through Google Play. The final price is shown at checkout.
               </p>
             </div>
 
             <div className="flex items-center gap-1 px-2 py-1 rounded-md bg-emerald-950/60 border border-emerald-800/50 text-emerald-300 text-[11px] font-semibold">
               <Smartphone className="w-3 h-3" />
-              <span>Google Play Ready</span>
+              <span>Google Play</span>
             </div>
           </div>
 
@@ -321,13 +335,13 @@ export const ProModal: React.FC<ProModalProps> = ({
                 </div>
                 <div>
                   <h4 className="text-xs sm:text-sm font-bold text-amber-300">
-                    Google Play In-App Billing Ready
+                    Subscribe in the Android App
                   </h4>
                   <p className="text-xs text-slate-300 mt-1 leading-relaxed">
-                    Google Play Billing is configured for Android release. In the Android app, Google Play checkout automatically activates Pro upon successful purchase.
+                    Pro subscriptions are purchased through Google Play in the AI Document Helper Android app. Sign in there with this same account and Pro will also apply here.
                   </p>
                   <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
-                    For web preview & direct testing, you can also contact the administrator (<span className="text-slate-300 font-mono">{OWNER_EMAIL}</span>) to grant instant access.
+                    Questions about your plan? Contact support at <span className="text-slate-300 font-mono">{OWNER_EMAIL}</span>.
                   </p>
                 </div>
               </div>
@@ -437,7 +451,7 @@ export const ProModal: React.FC<ProModalProps> = ({
                 ) : (
                   <>
                     <Crown className="w-4 h-4 fill-current" />
-                    <span>Subscribe with Google Play ({billingCycle === 'annual' ? '₹699/yr' : '₹99/mo'})</span>
+                    <span>Subscribe with Google Play ({displayPrice}{billingCycle === 'annual' ? '/yr' : '/mo'})</span>
                   </>
                 )}
               </button>
@@ -463,6 +477,14 @@ export const ProModal: React.FC<ProModalProps> = ({
                 <Crown className="w-4 h-4 fill-current" />
                 Pro Tier Active on this Account (Unlimited Access)
               </div>
+              <a
+                href={`https://play.google.com/store/account/subscriptions?package=com.aidocumenthelper.app`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="w-full py-2 text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl flex items-center justify-center gap-1.5 transition-colors"
+              >
+                Manage or cancel subscription in Google Play
+              </a>
               <button
                 type="button"
                 id="btn-restore-google-play-active"
@@ -481,7 +503,7 @@ export const ProModal: React.FC<ProModalProps> = ({
           )}
 
           <p className="text-[10px] text-center text-slate-500 leading-tight">
-            Google Play In-App Billing with automatic Pro activation &bull; Certified for Android / Google Play Store release
+            Billed through Google Play &bull; Renews automatically until cancelled &bull; Cancel anytime in Google Play
           </p>
         </div>
       </div>

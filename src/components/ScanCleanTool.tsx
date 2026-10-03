@@ -29,6 +29,7 @@ import { ActiveTab } from '../types';
 import { SAMPLE_DOCUMENT_PHOTO_BASE64 } from '../data/sampleDocuments';
 import { cleanImageToPdf, imagesToPdf, downloadBlobFile } from '../utils/pdfHelper';
 import { shareDocumentContent } from '../utils/share';
+import { downloadDataUrl } from '../utils/download';
 import { QuickActionsBar } from './QuickActionsBar';
 
 interface ScanCleanToolProps {
@@ -365,12 +366,7 @@ export const ScanCleanTool: React.FC<ScanCleanToolProps> = ({
 
   const handleDownloadImage = () => {
     if (!currentPage?.cleanDataUrl) return;
-    const a = document.createElement('a');
-    a.href = currentPage.cleanDataUrl;
-    a.download = `Scan_Page_${activePageIndex + 1}_${Date.now()}.jpg`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    void downloadDataUrl(currentPage.cleanDataUrl, `Scan_Page_${activePageIndex + 1}_${Date.now()}.jpg`);
   };
 
   const handleShare = async () => {
@@ -430,13 +426,13 @@ export const ScanCleanTool: React.FC<ScanCleanToolProps> = ({
         <div className="p-3 bg-amber-500/15 border border-amber-500/40 rounded-xl flex items-center justify-between gap-3 text-xs text-amber-200 shadow-xs">
           <div className="flex items-center gap-2">
             <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
-            <span>Daily free limit reached (5/5). Start 30-day Pro trial for unlimited document scans.</span>
+            <span>Daily free limit reached (5/5). Upgrade to Pro for unlimited document scans, or try again tomorrow.</span>
           </div>
           <button
             onClick={onOpenPro}
             className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-xs shrink-0 transition-colors shadow-sm"
           >
-            Start Trial
+            Upgrade
           </button>
         </div>
       )}

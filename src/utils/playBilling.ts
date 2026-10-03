@@ -45,6 +45,7 @@ declare global {
         accountId?: string
       ) => void | Promise<any>;
       queryPurchases?: () => string | Promise<string>;
+      getProductPrices?: () => string;
     };
 
     AndroidBridge?: {
@@ -65,6 +66,35 @@ declare global {
     onGooglePlayPurchaseCompleted?: (
       purchaseData: any
     ) => void;
+
+    onGooglePlayPurchaseError?: (
+      message: string
+    ) => void;
+  }
+}
+
+/**
+ * Returns the localized prices configured in Google Play, keyed by
+ * product ID, when the native billing bridge provides them.
+ */
+export function getPlayProductPrices(): Partial<Record<PlayStoreSku, string>> {
+  try {
+    const raw = window.AndroidPlayBilling?.getProductPrices?.();
+
+    if (typeof raw !== 'string' || !raw) return {};
+
+    const parsed = JSON.parse(raw);
+    const result: Partial<Record<PlayStoreSku, string>> = {};
+
+    for (const sku of Object.values(PLAY_STORE_SKUS)) {
+      if (typeof parsed?.[sku] === 'string' && parsed[sku]) {
+        result[sku] = parsed[sku];
+      }
+    }
+
+    return result;
+  } catch {
+    return {};
   }
 }
 
@@ -314,7 +344,17 @@ export async function initiatePlayPurchase(
   // 1. Android Native WebView / Capacitor Bridge Flow
   if (window.AndroidPlayBilling?.launchBillingFlow) {
     try {
-      // Set up completion listener
+      // Set up completion and error listeners. The native layer reports
+      // cancellations, pending payments and billing errors through
+      // onGooglePlayPurchaseError, so the UI never stays stuck.
+      window.onGooglePlayPurchaseError = (message: string) => {
+        onError(
+          typeof message === 'string' && message
+            ? message
+            : 'Google Play purchase failed.'
+        );
+      };
+
       window.onGooglePlayPurchaseCompleted =
         async (purchaseData: any) => {
           try {
@@ -324,14 +364,26 @@ export async function initiatePlayPurchase(
                 : purchaseData?.purchaseToken ||
                   purchaseData?.token;
 
+            if (!token) {
+              onError('Google Play did not return a purchase token.');
+              return;
+            }
+
             const orderId =
-              purchaseData?.orderId;
+              purchaseData?.orderId || undefined;
+
+            // Prefer the product Google Play actually reported.
+            const purchasedSku =
+              typeof purchaseData?.sku === 'string' &&
+              Object.values(PLAY_STORE_SKUS).includes(purchaseData.sku)
+                ? purchaseData.sku
+                : sku;
 
             const res =
               await verifyAndActivatePlayPurchase(
                 {
                   purchaseToken: token,
-                  sku,
+                  sku: purchasedSku,
                   orderId,
                 },
                 authHeaders

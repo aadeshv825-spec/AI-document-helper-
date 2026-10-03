@@ -25,7 +25,8 @@ import {
   User,
 } from 'lucide-react';
 import { ActiveTab } from '../types';
-import { shareDocumentContent } from '../utils/share';
+import { shareDocumentContent, copyTextToClipboard } from '../utils/share';
+import { downloadTextFile, sanitizeFileName } from '../utils/download';
 import { apiFetch } from '../utils/apiClient';
 
 interface QuickActionsBarProps {
@@ -196,7 +197,7 @@ export const QuickActionsBar: React.FC<QuickActionsBarProps> = ({
 
   const handleCopySingleValue = async (value: string) => {
     try {
-      await navigator.clipboard.writeText(value);
+      if (!(await copyTextToClipboard(value))) throw new Error('Copy failed');
       setCopiedItemValue(value);
       setTimeout(() => setCopiedItemValue(null), 1500);
     } catch {
@@ -243,22 +244,14 @@ export const QuickActionsBar: React.FC<QuickActionsBarProps> = ({
       }
     }
 
-    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${documentTitle.replace(/\s+/g, '_')}_smart_extract.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    void downloadTextFile(content, `${sanitizeFileName(documentTitle)}_smart_extract.txt`);
   };
 
   const handleCopyResult = async () => {
     if (!actionResult) return;
     const textToCopy = JSON.stringify(actionResult, null, 2);
     try {
-      await navigator.clipboard.writeText(textToCopy);
+      if (!(await copyTextToClipboard(textToCopy))) throw new Error('Copy failed');
       setModalCopied(true);
       setTimeout(() => setModalCopied(false), 2000);
     } catch {

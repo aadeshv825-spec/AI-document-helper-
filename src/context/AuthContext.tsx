@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { UserProfile, UsageStats, PlanTier, AdminUserItem } from '../types';
 import { logger } from '../utils/logger';
+import { apiFetch } from '../utils/apiClient';
 import { restorePlayPurchases } from '../utils/playBilling';
 import {
   cancelNativeGoogleSignInTimeout,
@@ -34,6 +35,10 @@ interface AuthContextType {
     packageName?: string;
   }) => Promise<{ success: boolean; message?: string; error?: string }>;
   restoreGooglePlayPurchases: () => Promise<{ success: boolean; restored: boolean; message: string }>;
+  requestPasswordReset: (email: string) => Promise<{ success: boolean; message?: string; error?: string }>;
+  changePassword: (currentPassword: string, newPassword: string) => Promise<{ success: boolean; message?: string; error?: string }>;
+  connectionError: boolean;
+  retryConnection: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -66,6 +71,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [token, setToken] = useState<string | null>(() => localStorage.getItem(TOKEN_KEY));
   const [usage, setUsage] = useState<UsageStats>(DEFAULT_USAGE);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  // True when a saved session exists but the server could not be
+  // reached, so the user is not wrongly sent to the login screen.
+  const [connectionError, setConnectionError] = useState<boolean>(false);
 
   const getAuthHeaders = useCallback((): Record<string, string> => {
     const headers: Record<string, string> = {
@@ -90,9 +98,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (res.ok) {
         const data = await res.json();
 
+        setConnectionError(false);
+
         if (data.authenticated && data.user) {
           setUser(data.user);
         } else {
+          // The saved session is no longer valid on the server.
+          if (token) {
+            localStorage.removeItem(TOKEN_KEY);
+            setToken(null);
+          }
+
           setUser(null);
         }
 
@@ -100,18 +116,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setUsage(data.usage);
         }
       } else if (res.status === 401) {
+        setConnectionError(false);
         localStorage.removeItem(TOKEN_KEY);
         setToken(null);
         setUser(null);
+      } else if (token) {
+        // Server error: keep the saved session and offer a retry.
+        setConnectionError(true);
       }
     } catch (err) {
       logger.error('Failed to verify user session', err);
+
+      if (token) {
+        setConnectionError(true);
+      }
     } finally {
       setIsLoading(false);
     }
-  }, [getAuthHeaders]);
+  }, [getAuthHeaders, token]);
 
+  // Verify the saved session once on startup. Sign-in flows set the
+  // user directly, so re-checking on every token change is unnecessary.
   useEffect(() => {
+    checkAuth();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const retryConnection = useCallback(() => {
     checkAuth();
   }, [checkAuth]);
 
@@ -436,6 +467,87 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
 
         let isResolved = false;
+        let fallbackOverlay: HTMLDivElement | null = null;
+
+        const removeFallbackOverlay = () => {
+          if (fallbackOverlay) {
+            fallbackOverlay.remove();
+            fallbackOverlay = null;
+          }
+        };
+
+        // One Tap can be suppressed by the browser (cooldown after a
+        // dismissal, blocked third-party cookies, etc.). In that case show
+        // Google's standard sign-in button, which is not subject to those
+        // limits, instead of failing.
+        const showButtonFallback = (): boolean => {
+          if (typeof googleId.renderButton !== 'function') {
+            return false;
+          }
+
+          removeFallbackOverlay();
+
+          const overlay = document.createElement('div');
+          overlay.setAttribute('role', 'dialog');
+          overlay.setAttribute('aria-modal', 'true');
+          overlay.setAttribute('aria-label', 'Sign in with Google');
+          overlay.style.cssText =
+            'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(2,6,23,0.8);padding:16px;';
+
+          const card = document.createElement('div');
+          card.style.cssText =
+            'background:#0f172a;border:1px solid #334155;border-radius:16px;padding:20px;max-width:340px;width:100%;text-align:center;font-family:inherit;';
+
+          const title = document.createElement('p');
+          title.textContent = 'Continue with your Google account';
+          title.style.cssText =
+            'color:#e2e8f0;font-size:14px;font-weight:600;margin:0 0 14px;';
+
+          const buttonHost = document.createElement('div');
+          buttonHost.style.cssText =
+            'display:flex;justify-content:center;min-height:44px;';
+
+          const cancel = document.createElement('button');
+          cancel.type = 'button';
+          cancel.textContent = 'Cancel';
+          cancel.style.cssText =
+            'margin-top:14px;background:none;border:0;color:#94a3b8;font-size:13px;cursor:pointer;padding:6px 12px;';
+          cancel.onclick = () => {
+            if (isResolved) return;
+
+            isResolved = true;
+            removeFallbackOverlay();
+
+            resolve({
+              success: false,
+              error: 'Google account selection was cancelled.',
+            });
+          };
+
+          card.appendChild(title);
+          card.appendChild(buttonHost);
+          card.appendChild(cancel);
+          overlay.appendChild(card);
+          document.body.appendChild(overlay);
+          fallbackOverlay = overlay;
+
+          try {
+            googleId.renderButton(buttonHost, {
+              type: 'standard',
+              theme: 'outline',
+              size: 'large',
+              text: 'continue_with',
+              shape: 'pill',
+              width: 280,
+            });
+          } catch (renderErr) {
+            logger.error('Failed to render Google button', renderErr);
+            removeFallbackOverlay();
+            return false;
+          }
+
+          return true;
+        };
 
         googleId.initialize({
           client_id: WEB_CLIENT_ID,
@@ -444,6 +556,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             if (isResolved) return;
 
             isResolved = true;
+            removeFallbackOverlay();
 
             if (!response?.credential) {
               resolve({
@@ -513,17 +626,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         googleId.prompt((notification: any) => {
           if (notification.isNotDisplayed()) {
-            if (!isResolved) {
-              isResolved = true;
+            if (!isResolved && !fallbackOverlay) {
+              if (!showButtonFallback()) {
+                isResolved = true;
 
-              resolve({
-                success: false,
-                error:
-                  'Google prompt could not be displayed.',
-              });
+                resolve({
+                  success: false,
+                  error:
+                    'Google Sign-In could not be displayed in this browser. Please allow pop-ups and third-party sign-in, or use email and password.',
+                });
+              }
             }
           } else if (notification.isSkippedMoment()) {
-            if (!isResolved) {
+            if (!isResolved && !fallbackOverlay) {
               isResolved = true;
 
               resolve({
@@ -534,6 +649,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           } else if (notification.isDismissedMoment()) {
             if (
               !isResolved &&
+              !fallbackOverlay &&
               notification.getDismissedReason() !==
                 'credential_returned'
             ) {
@@ -662,6 +778,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         };
       }
 
+      // Remove this account's documents cached on this device.
+      try {
+        if (user?.id) {
+          localStorage.removeItem(`ai_doc_user_${user.id}_history`);
+        }
+      } catch {
+        // ignore
+      }
+
       localStorage.removeItem(TOKEN_KEY);
       setToken(null);
       setUser(null);
@@ -675,12 +800,80 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const isAdmin =
-    !!(
-      user?.isAdmin ||
-      user?.email?.toLowerCase() ===
-        'aadeshv825@gmail.com'
-    );
+  // Admin status comes only from the server, which applies the owner
+  // rule after verifying the account.
+  const isAdmin = Boolean(user?.isAdmin);
+
+  const requestPasswordReset = async (email: string) => {
+    try {
+      const res = await apiFetch('/api/auth/password-reset/request', {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ email }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        return {
+          success: false,
+          error: data.error || 'Could not request a password reset.',
+        };
+      }
+
+      return {
+        success: true,
+        message: data.message,
+      };
+    } catch {
+      return {
+        success: false,
+        error: 'Network error. Please try again.',
+      };
+    }
+  };
+
+  const changePassword = async (
+    currentPassword: string,
+    newPassword: string
+  ) => {
+    try {
+      const res = await apiFetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        return {
+          success: false,
+          error: data.error || 'Failed to change password.',
+        };
+      }
+
+      // Other sessions were revoked; keep this device signed in.
+      if (data.token) {
+        localStorage.setItem(TOKEN_KEY, data.token);
+        setToken(data.token);
+      }
+
+      if (data.user) {
+        setUser(data.user);
+      }
+
+      return {
+        success: true,
+        message: data.message,
+      };
+    } catch {
+      return {
+        success: false,
+        error: 'Network error. Please try again.',
+      };
+    }
+  };
 
   const fetchAdminUsers = async () => {
     try {
@@ -865,6 +1058,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         updateUserPlanByAdmin,
         activateGooglePlayPurchase,
         restoreGooglePlayPurchases,
+        requestPasswordReset,
+        changePassword,
+        connectionError,
+        retryConnection,
       }}
     >
       {children}

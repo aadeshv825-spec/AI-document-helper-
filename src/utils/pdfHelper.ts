@@ -1,4 +1,5 @@
 import { PDFDocument } from 'pdf-lib';
+import { saveBlobToDevice } from './download';
 
 /**
  * Merges multiple PDF byte arrays into a single unified PDF document.
@@ -53,6 +54,42 @@ export async function getPdfPageCount(pdfBuffer: Uint8Array): Promise<number> {
 }
 
 /**
+ * Returns the data URL unchanged for JPEG/PNG images, otherwise redraws
+ * the image (e.g. WebP, GIF, BMP) on a canvas and returns a JPEG.
+ */
+async function ensureJpegOrPngDataUrl(dataUrl: string): Promise<string> {
+  if (/^data:image\/(jpeg|jpg|png);/i.test(dataUrl)) {
+    return dataUrl;
+  }
+
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () =>
+      reject(new Error('This image format is not supported. Please use JPG or PNG images.'));
+    img.src = dataUrl;
+  });
+
+  const canvas = document.createElement('canvas');
+  canvas.width = image.naturalWidth || image.width;
+  canvas.height = image.naturalHeight || image.height;
+
+  const context = canvas.getContext('2d');
+  if (!context || !canvas.width || !canvas.height) {
+    throw new Error('This image could not be converted. Please use JPG or PNG images.');
+  }
+
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0);
+
+  const jpeg = canvas.toDataURL('image/jpeg', 0.92);
+  canvas.width = 0;
+  canvas.height = 0;
+  return jpeg;
+}
+
+/**
  * Converts an array of image data URLs into a formatted multipage PDF.
  */
 export async function imagesToPdf(
@@ -70,10 +107,11 @@ export async function imagesToPdf(
   const pdfDoc = await PDFDocument.create();
 
   for (const imgItem of images) {
-    const dataUrl = imgItem.dataUrl;
+    // pdf-lib only embeds JPEG and PNG; convert other formats first.
+    const dataUrl = await ensureJpegOrPngDataUrl(imgItem.dataUrl);
     let embeddedImg;
 
-    if (dataUrl.includes('image/png')) {
+    if (dataUrl.startsWith('data:image/png')) {
       embeddedImg = await pdfDoc.embedPng(dataUrl);
     } else {
       // JPEG or WebP converted to JPEG
@@ -139,12 +177,6 @@ export async function cleanImageToPdf(
  */
 export function downloadBlobFile(bytes: Uint8Array, fileName: string, mimeType: string = 'application/pdf') {
   const blob = new Blob([bytes], { type: mimeType });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = fileName;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  // Works in browsers and in the Android app (native save).
+  return saveBlobToDevice(blob, fileName);
 }

@@ -18,7 +18,7 @@ import {
 import { TranslationResponse, ActiveTab } from '../types';
 import { SAMPLE_DOCUMENTS } from '../data/sampleDocuments';
 import { speakText, stopSpeaking } from '../utils/speech';
-import { shareDocumentContent } from '../utils/share';
+import { shareDocumentContent, copyTextToClipboard } from '../utils/share';
 import { downloadTextFile } from '../utils/download';
 import { apiFetch } from '../utils/apiClient';
 import { QuickActionsBar } from './QuickActionsBar';
@@ -114,7 +114,7 @@ export const HindiTranslationTool: React.FC<HindiTranslationProps> = ({
 
   const handleCopy = () => {
     if (!result?.translatedText) return;
-    navigator.clipboard.writeText(result.translatedText);
+    void copyTextToClipboard(result.translatedText);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -163,13 +163,13 @@ export const HindiTranslationTool: React.FC<HindiTranslationProps> = ({
         <div className="p-3 bg-amber-500/15 border border-amber-500/40 rounded-xl flex items-center justify-between gap-3 text-xs text-amber-200 shadow-xs">
           <div className="flex items-center gap-2">
             <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
-            <span>Daily free limit reached (5/5). Start 30-day Pro trial for unlimited translations.</span>
+            <span>Daily free limit reached (5/5). Upgrade to Pro for unlimited translations, or try again tomorrow.</span>
           </div>
           <button
             onClick={onOpenPro}
             className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-xs shrink-0 transition-colors shadow-sm"
           >
-            Start Trial
+            Upgrade
           </button>
         </div>
       )}
@@ -256,6 +256,7 @@ export const HindiTranslationTool: React.FC<HindiTranslationProps> = ({
           id="translate-input-textarea"
           value={inputText}
           onChange={(e) => setInputText(e.target.value)}
+          maxLength={20000}
           placeholder={
             targetLang === 'Hindi'
               ? 'Enter English official letter, clause, or notice to translate into formal Hindi...'

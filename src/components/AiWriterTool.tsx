@@ -18,7 +18,8 @@ import {
   FolderOpen,
 } from 'lucide-react';
 import { AiWriterResponse, ActiveTab } from '../types';
-import { shareDocumentContent } from '../utils/share';
+import { shareDocumentContent, copyTextToClipboard } from '../utils/share';
+import { downloadTextFile, sanitizeFileName } from '../utils/download';
 import { apiFetch } from '../utils/apiClient';
 import { QuickActionsBar } from './QuickActionsBar';
 
@@ -290,7 +291,7 @@ export const AiWriterTool: React.FC<AiWriterProps> = ({
   const handleCopy = async () => {
     if (!editedContent) return;
     try {
-      await navigator.clipboard.writeText(editedContent);
+      if (!(await copyTextToClipboard(editedContent))) throw new Error('Copy failed');
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -312,15 +313,10 @@ export const AiWriterTool: React.FC<AiWriterProps> = ({
 
   const handleDownload = () => {
     if (!editedContent) return;
-    const blob = new Blob([editedContent], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${(draftResult?.title || docType || 'Document').replace(/\s+/g, '_')}.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    void downloadTextFile(
+      editedContent,
+      `${sanitizeFileName(draftResult?.title || docType || 'Document')}.txt`
+    );
   };
 
   return (

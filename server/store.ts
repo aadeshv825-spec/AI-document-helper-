@@ -1013,8 +1013,12 @@ export function updateUserProfile(
       throw new Error('Invalid name.');
     }
 
-    user.name =
-      updates.name.trim().slice(0, 100);
+    const trimmedName = updates.name.trim().slice(0, 100);
+
+    // Keep the existing name rather than saving an empty one.
+    if (trimmedName) {
+      user.name = trimmedName;
+    }
   }
 
   if (
@@ -1147,6 +1151,118 @@ export function deleteUserAccount(
   });
 
   persistDocumentDeletion(userId);
+}
+
+// -------------------------------------------------------------
+// PASSWORD CHANGE & RESET
+// -------------------------------------------------------------
+
+export function findUserByEmail(
+  email: string
+): StoredUser | null {
+  if (typeof email !== 'string') return null;
+
+  const normalizedEmail = email.trim().toLowerCase();
+
+  return (
+    users.find(
+      (u) => u.email.toLowerCase() === normalizedEmail
+    ) || null
+  );
+}
+
+function assertValidNewPassword(password: unknown): asserts password is string {
+  if (
+    typeof password !== 'string' ||
+    password.length < PASSWORD_MIN_LENGTH ||
+    password.length > PASSWORD_MAX_LENGTH
+  ) {
+    throw new Error(
+      `Password must be between ${PASSWORD_MIN_LENGTH} and ${PASSWORD_MAX_LENGTH} characters long.`
+    );
+  }
+}
+
+// Sets a new password with the current hash configuration and revokes
+// every existing session of the user, so a leaked or old session can
+// no longer be used after a password change or reset.
+export function setUserPassword(
+  userId: string,
+  newPassword: string
+): StoredUser {
+  const user = users.find((u) => u.id === userId);
+
+  if (!user) {
+    throw new Error('User not found.');
+  }
+
+  // The owner account must use verified Google authentication.
+  if (user.email.toLowerCase() === OWNER_EMAIL) {
+    throw new Error(
+      'Owner account must sign in with Google.'
+    );
+  }
+
+  assertValidNewPassword(newPassword);
+
+  const salt = crypto
+    .randomBytes(PASSWORD_SALT_BYTES)
+    .toString('hex');
+
+  user.passwordHash = hashPassword(
+    newPassword,
+    salt,
+    PASSWORD_HASH_ITERATIONS
+  );
+  user.salt = salt;
+  user.passwordHashIterations = PASSWORD_HASH_ITERATIONS;
+
+  persistUser(user);
+
+  sessions = sessions.filter(
+    (s) => s.userId !== userId
+  );
+
+  persistSessionChanges({
+    allForUser: userId,
+  });
+
+  return user;
+}
+
+// Verifies the current password of a signed-in user without creating
+// a session. Returns false for Google-only accounts.
+export function verifyUserPassword(
+  userId: string,
+  password: unknown
+): boolean {
+  const user = users.find((u) => u.id === userId);
+
+  if (
+    !user ||
+    !user.passwordHash ||
+    !user.salt ||
+    typeof password !== 'string' ||
+    password.length === 0 ||
+    password.length > PASSWORD_MAX_LENGTH
+  ) {
+    return false;
+  }
+
+  const storedIterations = resolveStoredIterations(user);
+
+  if (
+    storedIterations === null ||
+    !PASSWORD_SALT_HEX_PATTERN.test(user.salt) ||
+    !PASSWORD_HASH_HEX_PATTERN.test(user.passwordHash)
+  ) {
+    return false;
+  }
+
+  return isPasswordHashMatch(
+    hashPassword(password, user.salt, storedIterations),
+    user.passwordHash
+  );
 }
 
 // -------------------------------------------------------------

@@ -20,7 +20,7 @@ import {
 import { PhotoToTextResponse, ActiveTab } from '../types';
 import { SAMPLE_DOCUMENT_PHOTO_BASE64 } from '../data/sampleDocuments';
 import { speakText, stopSpeaking } from '../utils/speech';
-import { shareDocumentContent } from '../utils/share';
+import { shareDocumentContent, copyTextToClipboard } from '../utils/share';
 import { downloadTextFile } from '../utils/download';
 import { QuickActionsBar } from './QuickActionsBar';
 import { apiFetch } from '../utils/apiClient';
@@ -293,7 +293,7 @@ export const PhotoToTextTool: React.FC<PhotoToTextProps> = ({
 
   const handleCopy = () => {
     if (!result?.extractedText) return;
-    navigator.clipboard.writeText(result.extractedText);
+    void copyTextToClipboard(result.extractedText);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -337,13 +337,13 @@ export const PhotoToTextTool: React.FC<PhotoToTextProps> = ({
         <div className="p-3 bg-amber-500/15 border border-amber-500/40 rounded-xl flex items-center justify-between gap-3 text-xs text-amber-200 shadow-xs">
           <div className="flex items-center gap-2">
             <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
-            <span>Daily free limit reached (5/5). Start 30-day Pro trial for unlimited scans.</span>
+            <span>Daily free limit reached (5/5). Upgrade to Pro for unlimited scans, or try again tomorrow.</span>
           </div>
           <button
             onClick={onOpenPro}
             className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-xs shrink-0 transition-colors shadow-sm"
           >
-            Start Trial
+            Upgrade
           </button>
         </div>
       )}

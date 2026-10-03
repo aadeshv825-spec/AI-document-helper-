@@ -30,8 +30,10 @@ class PlayBillingManager(
 
     private var isConnected = false
 
+    // Read from the JavaScript bridge thread and written from billing
+    // callbacks, so it must be thread-safe.
     private val productDetailsMap =
-        mutableMapOf<String, ProductDetails>()
+        java.util.concurrent.ConcurrentHashMap<String, ProductDetails>()
 
     init {
         startConnection()
@@ -120,6 +122,28 @@ class PlayBillingManager(
     @JavascriptInterface
     fun isAvailable(): Boolean {
         return isConnected
+    }
+
+    // Localized base-plan prices from Google Play, keyed by product ID.
+    @JavascriptInterface
+    fun getProductPrices(): String {
+        val result = JSONObject()
+
+        for ((productId, details) in productDetailsMap) {
+            val price =
+                details.subscriptionOfferDetails
+                    ?.firstOrNull()
+                    ?.pricingPhases
+                    ?.pricingPhaseList
+                    ?.lastOrNull()
+                    ?.formattedPrice
+
+            if (!price.isNullOrBlank()) {
+                result.put(productId, price)
+            }
+        }
+
+        return result.toString()
     }
 
     @JavascriptInterface
@@ -284,6 +308,13 @@ class PlayBillingManager(
             BillingClient.BillingResponseCode.USER_CANCELED
         ) {
             notifyWebError("Google Play purchase was cancelled.")
+        } else if (
+            billingResult.responseCode ==
+            BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED
+        ) {
+            notifyWebError(
+                "You already have this subscription. Tap Restore Purchases to activate Pro on this account."
+            )
         } else {
             notifyWebError(
                 "Google Play purchase error: ${billingResult.debugMessage}"
@@ -293,10 +324,21 @@ class PlayBillingManager(
 
     private fun handlePurchase(purchase: Purchase) {
         if (
+            purchase.purchaseState ==
+            Purchase.PurchaseState.PENDING
+        ) {
+            notifyWebError(
+                "Your payment is pending. Pro will activate after Google Play confirms the payment. Use Restore Purchases later to check."
+            )
+            return
+        }
+
+        if (
             purchase.purchaseState !=
             Purchase.PurchaseState.PURCHASED
         ) {
             Log.w(tag, "Purchase is not in PURCHASED state")
+            notifyWebError("Google Play purchase was not completed.")
             return
         }
 
@@ -334,6 +376,10 @@ class PlayBillingManager(
 
     private fun notifyWebError(msg: String) {
         activity.runOnUiThread {
+            if (!MainActivity.isTrustedAppUrl(webView.url)) {
+                return@runOnUiThread
+            }
+
             val escaped = JSONObject.quote(msg)
 
             val script =

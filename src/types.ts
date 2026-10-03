@@ -33,6 +33,9 @@ export interface DocumentHistoryItem {
   timestamp: number;
   isFavorite?: boolean;
   category?: string;
+  // Set while a signed-in user's document has not yet been saved to
+  // the cloud; such documents are uploaded by the next sync.
+  pendingSync?: boolean;
 }
 
 export type PlanTier = 'free' | 'pro';
@@ -47,6 +50,7 @@ export interface UserProfile {
   preferredLanguage?: string;
   avatarUrl?: string;
   authProvider?: 'password' | 'google';
+  hasPassword?: boolean;
   isAdmin?: boolean;
 }
 
@@ -99,6 +103,8 @@ export interface PdfSummaryResponse {
   keyPoints: string[];
   actionItems: string[];
   importantDatesOrNumbers: string[];
+  /** True when the document was too long and only the beginning was analysed. */
+  truncated?: boolean;
 }
 
 export interface AskDocumentResponse {

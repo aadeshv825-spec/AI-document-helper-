@@ -267,7 +267,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                 {isPro
                   ? 'Priority Gemini AI processing & unlimited daily OCR enabled'
                   : usage.dailyUsed >= usage.dailyLimit
-                  ? 'Daily free quota reached (5/5). Start 30-day Pro trial for unlimited scans.'
+                  ? 'Daily free quota reached (5/5). Upgrade to Pro for unlimited scans, or try again tomorrow.'
                   : `${usage.dailyLimit - usage.dailyUsed} free operations remaining today`}
               </p>
             </div>
@@ -282,7 +282,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                 className="w-full sm:w-auto py-1.5 px-3 rounded-lg bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-1 shadow-sm transition-all active:scale-95"
               >
                 <Crown className="w-3.5 h-3.5 fill-current" />
-                {usage.dailyUsed >= usage.dailyLimit ? 'Start 30-Day Trial' : 'Upgrade to Pro'}
+                {usage.dailyUsed >= usage.dailyLimit ? 'Upgrade to Pro' : 'Upgrade to Pro'}
               </button>
             ) : (
               <button
@@ -300,13 +300,13 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           <div className="p-3 bg-amber-500/15 border border-amber-500/40 rounded-xl flex items-center justify-between gap-3 text-xs text-amber-200 shadow-xs">
             <div className="flex items-center gap-2">
               <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
-              <span>Free daily quota reached. Activate your 30-Day Pro Trial to scan without interruption.</span>
+              <span>Free daily quota reached. Upgrade to Pro to keep working without interruption.</span>
             </div>
             <button
               onClick={onOpenPro}
               className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-xs shrink-0 transition-colors shadow-sm"
             >
-              Start Trial
+              Upgrade
             </button>
           </div>
         )}
@@ -530,7 +530,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           className="w-full py-2 bg-slate-800 hover:bg-slate-750 text-slate-200 border border-slate-700/80 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
         >
           <Crown className="w-3.5 h-3.5 text-amber-400" />
-          {isPro ? 'View Pro Membership Details' : 'Explore Pro & Start 30-Day Free Trial'}
+          {isPro ? 'View Pro Membership Details' : 'Explore Pro Membership'}
         </button>
       </div>
 

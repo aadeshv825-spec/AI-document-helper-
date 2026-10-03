@@ -54,7 +54,7 @@ export const AboutModal: React.FC<ModalBaseProps> = ({ isOpen, onClose }) => {
                 <div>
                   <h4 className="font-semibold text-slate-100 mb-0.5">Gemini 3 Multimodal Intelligence</h4>
                   <p className="text-slate-400">
-                    High-accuracy optical character recognition (OCR), executive summaries, Q&A citations, and verified Hindi-English translation powered by server-side Gemini models.
+                    High-accuracy optical character recognition (OCR), executive summaries, Q&A, and Hindi-English translation powered by server-side Gemini models.
                   </p>
                 </div>
               </div>
@@ -142,21 +142,21 @@ export const HelpModal: React.FC<ModalBaseProps> = ({ isOpen, onClose }) => {
               <div className="p-3 bg-slate-800/50 rounded-xl border border-slate-700/50">
                 <h4 className="font-medium text-slate-200 mb-1">How many actions do Free users get?</h4>
                 <p className="text-slate-400 text-[11px] leading-relaxed">
-                  Free accounts receive 5 AI actions every day (OCR, summary, Q&A, translation, and letter drafting). Unlimited actions are unlocked with Pro (₹99/month or ₹699/year) or via our 30-day trial.
+                  Free accounts receive 5 AI actions every day (OCR, summary, Q&A, translation, and letter drafting). Unlimited actions are unlocked with Pro (₹99/month or ₹699/year).
                 </p>
               </div>
 
               <div className="p-3 bg-slate-800/50 rounded-xl border border-slate-700/50">
                 <h4 className="font-medium text-slate-200 mb-1">Are my uploaded documents private?</h4>
                 <p className="text-slate-400 text-[11px] leading-relaxed">
-                  Yes. Images and document texts sent for AI inference are processed transiently in server memory and not stored for model training. Offline PDF tools process files completely on your device.
+                  Files you send to an AI feature are passed to our server and to Google's Gemini API only to produce your result; the uploaded file itself is not kept on our server. Results you save to History are stored in your account until you delete them. PDF tools (merge, split, compress, convert) and Scan & Clean run on your device.
                 </p>
               </div>
 
               <div className="p-3 bg-slate-800/50 rounded-xl border border-slate-700/50">
                 <h4 className="font-medium text-slate-200 mb-1">How do I access my saved documents on another phone or computer?</h4>
                 <p className="text-slate-400 text-[11px] leading-relaxed">
-                  Simply Sign In to your account. Your history, favorites, summaries, and categorized folders sync automatically across all devices.
+                  Sign in to the same account. Saved history, favorites and folders sync to your account when you are online.
                 </p>
               </div>
             </div>
@@ -193,35 +193,35 @@ export const PrivacyModal: React.FC<ModalBaseProps> = ({ isOpen, onClose }) => {
 
           <div className="p-6 space-y-4 overflow-y-auto text-xs text-slate-300 leading-relaxed">
             <p className="text-slate-400 text-[11px]">
-              Last updated: September 2026. Compliant with international data privacy standards and the Digital Personal Data Protection (DPDP) Act.
+              Last updated: October 2026.
             </p>
 
             <div className="space-y-3">
               <div>
                 <h4 className="font-semibold text-slate-100 mb-1">1. Information We Collect</h4>
                 <p className="text-slate-400">
-                  We collect account identifiers (email address, display name) and encrypted session credentials strictly to maintain your account and sync your saved documents across your authorized devices.
+                  We store your email address, display name, preferred language, a securely hashed password (for email accounts) or your Google account ID (for Google Sign-In), your daily usage count, your Google Play subscription status, and the documents and results you save to History.
                 </p>
               </div>
 
               <div>
                 <h4 className="font-semibold text-slate-100 mb-1">2. Document Processing & AI Protection</h4>
                 <p className="text-slate-400">
-                  Documents submitted for AI text extraction, summarization, Q&A, and translation are sent via TLS 1.3 encrypted connections to our secure backend proxy. Neither AI Document Helper nor our AI model providers store or train on your personal document contents.
+                  Documents submitted for text extraction, summarization, Q&A, translation and writing are sent over encrypted HTTPS connections to our server and processed by Google's Gemini API to generate the result. We do not use your documents to train AI models. Google processes this content under its own Gemini API terms. Please review AI results before relying on them.
                 </p>
               </div>
 
               <div>
                 <h4 className="font-semibold text-slate-100 mb-1">3. Client-Side Document Tools</h4>
                 <p className="text-slate-400">
-                  Our PDF utilities (Merge, Split, Compress, Convert) and the Scan & Clean tool operate locally in your browser memory using WebAssembly and Canvas APIs. The original files never touch our servers.
+                  The PDF utilities (Merge, Split, Compress, Convert) and the Scan & Clean tool run on your device. These files are not uploaded unless you send the result to an AI feature.
                 </p>
               </div>
 
               <div>
                 <h4 className="font-semibold text-slate-100 mb-1">4. Right to Deletion (Right to be Forgotten)</h4>
                 <p className="text-slate-400">
-                  You have absolute control over your data. You can delete individual documents anytime, or permanently delete your entire account and all cloud records with one tap from the Profile settings.
+                  You can delete individual documents at any time, or delete your account and saved documents from Profile settings. Records of Google Play purchases may be kept where required for billing, fraud prevention or legal reasons. Deleting your account does not cancel a Google Play subscription; cancel it in Google Play.
                 </p>
               </div>
             </div>

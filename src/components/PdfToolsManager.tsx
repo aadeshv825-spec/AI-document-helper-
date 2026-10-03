@@ -29,6 +29,7 @@ import {
 } from '../utils/pdfHelper';
 import { renderPdfToImages, RenderedPdfPage } from '../utils/pdfRenderer';
 import { shareDocumentContent } from '../utils/share';
+import { downloadDataUrl } from '../utils/download';
 import { SAMPLE_DOCUMENTS } from '../data/sampleDocuments';
 import { QuickActionsBar } from './QuickActionsBar';
 
@@ -263,11 +264,28 @@ export const PdfToolsManager: React.FC<PdfToolsProps> = ({
     setErrorMessage(null);
 
     try {
-      // Re-encode and optimize PDF streams
+      // Compression re-renders each page as an image. Every page must be
+      // included, so very long documents are refused instead of being cut.
+      const MAX_COMPRESS_PAGES = 60;
       const scale = compressionLevel === 'high' ? 0.95 : 1.2;
-      const rendered = await renderPdfToImages(compressFile.bytes, scale, 15);
-      if (rendered.length === 0) {
-        throw new Error('Unable to optimize document streams.');
+      let totalPages = 0;
+      const rendered = await renderPdfToImages(
+        compressFile.bytes,
+        scale,
+        MAX_COMPRESS_PAGES,
+        (count) => {
+          totalPages = count;
+        }
+      );
+
+      if (totalPages > MAX_COMPRESS_PAGES) {
+        throw new Error(
+          `This PDF has ${totalPages} pages. Compression supports up to ${MAX_COMPRESS_PAGES} pages; please split it first.`
+        );
+      }
+
+      if (rendered.length === 0 || rendered.length !== totalPages) {
+        throw new Error('Unable to read every page of this PDF.');
       }
 
       const optimizedBytes = await imagesToPdf(
@@ -276,13 +294,24 @@ export const PdfToolsManager: React.FC<PdfToolsProps> = ({
       );
 
       const newSize = optimizedBytes.byteLength;
+
+      if (newSize >= compressFile.sizeBytes) {
+        setCompressResult(null);
+        setStatusMessage(
+          'This PDF is already well optimized. A compressed copy would not be smaller, so your original file is the best version.'
+        );
+        return;
+      }
+
       setCompressResult({
         originalSize: compressFile.sizeBytes,
         newSize,
         bytes: optimizedBytes,
       });
 
-      setStatusMessage('PDF successfully compressed!');
+      setStatusMessage(
+        'PDF compressed. Note: pages are stored as images in the compressed copy, so text cannot be selected or searched.'
+      );
       onSaveHistory(
         `Compressed PDF: ${compressFile.name}`,
         'pdf-tools',
@@ -361,9 +390,16 @@ export const PdfToolsManager: React.FC<PdfToolsProps> = ({
 
     try {
       const buffer = await file.arrayBuffer();
-      const pages = await renderPdfToImages(new Uint8Array(buffer), 1.5, 20);
+      let totalPages = 0;
+      const pages = await renderPdfToImages(new Uint8Array(buffer), 1.5, 20, (count) => {
+        totalPages = count;
+      });
       setPdfPages(pages);
-      setStatusMessage(`Rendered ${pages.length} pages into high-resolution images.`);
+      setStatusMessage(
+        totalPages > pages.length
+          ? `Rendered the first ${pages.length} of ${totalPages} pages as images. Split the PDF to convert the remaining pages.`
+          : `Rendered ${pages.length} pages into high-resolution images.`
+      );
     } catch (err: any) {
       setErrorMessage('Failed to extract images from PDF: ' + (err.message || 'Check file'));
     } finally {
@@ -372,12 +408,7 @@ export const PdfToolsManager: React.FC<PdfToolsProps> = ({
   };
 
   const handleDownloadSinglePageImage = (page: RenderedPdfPage) => {
-    const a = document.createElement('a');
-    a.href = page.dataUrl;
-    a.download = `Page_${page.pageNumber}.jpg`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    void downloadDataUrl(page.dataUrl, `Page_${page.pageNumber}.jpg`);
   };
 
   const handleSendPageToOcr = (page: RenderedPdfPage) => {
@@ -399,13 +430,13 @@ export const PdfToolsManager: React.FC<PdfToolsProps> = ({
         <div className="p-3 bg-amber-500/15 border border-amber-500/40 rounded-xl flex items-center justify-between gap-3 text-xs text-amber-200 shadow-xs">
           <div className="flex items-center gap-2">
             <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
-            <span>Daily free limit reached (5/5). Start 30-day Pro trial for unlimited PDF utilities.</span>
+            <span>Daily free limit reached (5/5). Upgrade to Pro for unlimited PDF utilities, or try again tomorrow.</span>
           </div>
           <button
             onClick={onOpenPro}
             className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-xs shrink-0 transition-colors shadow-sm"
           >
-            Start Trial
+            Upgrade
           </button>
         </div>
       )}

@@ -31,7 +31,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   onOpenPro,
   onOpenAdminUsers,
 }) => {
-  const { user, usage, logout, updateProfile, deleteAccount } = useAuth();
+  const { user, usage, logout, updateProfile, deleteAccount, changePassword } = useAuth();
 
   const [editingName, setEditingName] = useState(false);
   const [nameVal, setNameVal] = useState(user?.name || '');
@@ -40,8 +40,46 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteLoading, setDeleteLoading] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  // Change password (email/password accounts only)
+  const [showPasswordForm, setShowPasswordForm] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [passwordLoading, setPasswordLoading] = useState(false);
+  const [passwordMessage, setPasswordMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
   if (!isOpen || !user) return null;
+
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPasswordMessage(null);
+
+    if (newPassword.length < 6) {
+      setPasswordMessage({ ok: false, text: 'New password must be at least 6 characters long.' });
+      return;
+    }
+
+    if (newPassword !== confirmPassword) {
+      setPasswordMessage({ ok: false, text: 'The new passwords do not match.' });
+      return;
+    }
+
+    setPasswordLoading(true);
+    const res = await changePassword(currentPassword, newPassword);
+    setPasswordLoading(false);
+
+    if (res.success) {
+      setPasswordMessage({ ok: true, text: res.message || 'Password changed.' });
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      setShowPasswordForm(false);
+    } else {
+      setPasswordMessage({ ok: false, text: res.error || 'Failed to change password.' });
+    }
+  };
 
   const isPro = user.plan === 'pro';
   const memberSince = new Date(user.createdAt).toLocaleDateString('en-IN', {
@@ -52,20 +90,29 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
 
   const handleSaveProfile = async () => {
     setSaveLoading(true);
+    setActionError(null);
     const res = await updateProfile(nameVal, langVal);
     setSaveLoading(false);
     if (res.success) {
       setSaveSuccess(true);
       setEditingName(false);
       setTimeout(() => setSaveSuccess(false), 2500);
+    } else {
+      setActionError(res.error || 'Could not update your profile.');
     }
   };
 
   const handleDeleteAccount = async () => {
     setDeleteLoading(true);
-    await deleteAccount();
+    setActionError(null);
+    const res = await deleteAccount();
     setDeleteLoading(false);
-    onClose();
+
+    if (res.success) {
+      onClose();
+    } else {
+      setActionError(res.error || 'Could not delete your account. Please try again.');
+    }
   };
 
   const usagePercent = isPro ? 100 : Math.min(100, Math.round((usage.dailyUsed / usage.dailyLimit) * 100));
@@ -301,6 +348,92 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
               )}
             </div>
 
+            {actionError && (
+              <div role="alert" className="p-2 rounded-lg bg-red-950/50 border border-red-800/40 text-red-300 text-xs">
+                {actionError}
+              </div>
+            )}
+
+            {/* Change Password (email/password accounts) */}
+            {user.hasPassword && (
+              <div className="pt-4 border-t border-slate-800 space-y-2">
+                {!showPasswordForm ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowPasswordForm(true);
+                      setPasswordMessage(null);
+                    }}
+                    className="w-full py-2 bg-slate-800 hover:bg-slate-700/80 text-slate-200 text-xs font-medium rounded-xl border border-slate-700/50 transition-colors"
+                  >
+                    Change Password
+                  </button>
+                ) : (
+                  <form onSubmit={handleChangePassword} className="space-y-2">
+                    <label className="block text-[11px] text-slate-400">
+                      Current password
+                      <input
+                        type="password"
+                        autoComplete="current-password"
+                        value={currentPassword}
+                        onChange={(e) => setCurrentPassword(e.target.value)}
+                        required
+                        className="w-full mt-1 bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-blue-500"
+                      />
+                    </label>
+                    <label className="block text-[11px] text-slate-400">
+                      New password
+                      <input
+                        type="password"
+                        autoComplete="new-password"
+                        minLength={6}
+                        value={newPassword}
+                        onChange={(e) => setNewPassword(e.target.value)}
+                        required
+                        className="w-full mt-1 bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-blue-500"
+                      />
+                    </label>
+                    <label className="block text-[11px] text-slate-400">
+                      Confirm new password
+                      <input
+                        type="password"
+                        autoComplete="new-password"
+                        minLength={6}
+                        value={confirmPassword}
+                        onChange={(e) => setConfirmPassword(e.target.value)}
+                        required
+                        className="w-full mt-1 bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-blue-500"
+                      />
+                    </label>
+                    <div className="flex items-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowPasswordForm(false);
+                          setPasswordMessage(null);
+                        }}
+                        className="flex-1 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs rounded-lg transition-colors"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={passwordLoading}
+                        className="flex-1 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1 disabled:opacity-60"
+                      >
+                        {passwordLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Save Password'}
+                      </button>
+                    </div>
+                  </form>
+                )}
+                {passwordMessage && (
+                  <p role="status" className={`text-[11px] ${passwordMessage.ok ? 'text-emerald-300' : 'text-red-300'}`}>
+                    {passwordMessage.text}
+                  </p>
+                )}
+              </div>
+            )}
+
             {/* Logout & Delete Area */}
             <div className="pt-4 border-t border-slate-800 space-y-3">
               <button
@@ -332,6 +465,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                   </p>
                   <p className="text-[11px] text-slate-400">
                     This will delete your profile, history, and all cloud-synced documents. This action cannot be undone.
+                    {isPro && ' Deleting your account does not cancel a Google Play subscription; cancel it in Google Play first to stop future charges.'}
                   </p>
                   <div className="flex items-center gap-2 pt-1">
                     <button

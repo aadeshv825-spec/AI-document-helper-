@@ -10,7 +10,13 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
-import android.view.View
+import android.content.pm.ApplicationInfo
+import android.view.ViewGroup
+import android.webkit.RenderProcessGoneDetail
+import android.widget.FrameLayout
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import android.webkit.ConsoleMessage
 import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
@@ -40,6 +46,16 @@ class MainActivity : AppCompatActivity() {
 
     private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
     private var currentCameraPhotoUri: Uri? = null
+    private var currentCameraPhotoFile: File? = null
+
+    // File chooser waiting for the camera permission answer.
+    private var pendingFileChooserParams: WebChromeClient.FileChooserParams? = null
+    private var hasPendingFileChooser = false
+
+    private lateinit var rootContainer: FrameLayout
+
+    private val isDebuggable: Boolean
+        get() = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
 
     private var pendingWebPermissionRequest: PermissionRequest? = null
 
@@ -75,6 +91,18 @@ class MainActivity : AppCompatActivity() {
 
             val cameraGranted =
                 permissions[Manifest.permission.CAMERA] ?: false
+
+            // Continue a file chooser that was waiting for this answer.
+            // The camera option is only offered if permission was granted.
+            if (hasPendingFileChooser) {
+                val params = pendingFileChooserParams
+                hasPendingFileChooser = false
+                pendingFileChooserParams = null
+
+                if (fileChooserCallback != null && !isFinishing && !isDestroyed) {
+                    launchSystemMediaPicker(params)
+                }
+            }
 
             val pendingRequest =
                 pendingWebPermissionRequest
@@ -153,6 +181,8 @@ class MainActivity : AppCompatActivity() {
             ActivityResultContracts.StartActivityForResult()
         ) { result ->
 
+            val capturedFile = currentCameraPhotoFile
+
             if (result.resultCode == Activity.RESULT_OK) {
 
                 val data = result.data
@@ -180,7 +210,9 @@ class MainActivity : AppCompatActivity() {
                             )
                         }
 
-                        currentCameraPhotoUri != null -> {
+                        currentCameraPhotoUri != null &&
+                            capturedFile != null &&
+                            capturedFile.length() > 0 -> {
                             arrayOf(
                                 currentCameraPhotoUri!!
                             )
@@ -195,14 +227,26 @@ class MainActivity : AppCompatActivity() {
                     results
                 )
 
+                // Remove the unused empty camera file when a document
+                // was picked from storage instead.
+                if (
+                    capturedFile != null &&
+                    (results == null || !results.contains(currentCameraPhotoUri))
+                ) {
+                    capturedFile.delete()
+                }
+
             } else {
                 fileChooserCallback?.onReceiveValue(
                     null
                 )
+
+                capturedFile?.delete()
             }
 
             fileChooserCallback = null
             currentCameraPhotoUri = null
+            currentCameraPhotoFile = null
         }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -213,15 +257,48 @@ class MainActivity : AppCompatActivity() {
             savedInstanceState
         )
 
-        window.decorView.systemUiVisibility =
-            View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+        // Android 15+ (targetSdk 35+) always draws edge-to-edge. Apply the
+        // system bar and keyboard insets as padding so the app is never
+        // hidden behind the status bar, navigation bar or keyboard.
+        WindowCompat.setDecorFitsSystemWindows(window, false)
 
-        webView = WebView(this)
+        rootContainer = FrameLayout(this).apply {
+            setBackgroundColor(ContextCompat.getColor(this@MainActivity, R.color.background))
+        }
 
-        setContentView(webView)
+        webView = WebView(this).apply {
+            setBackgroundColor(ContextCompat.getColor(this@MainActivity, R.color.background))
+        }
 
-        checkAndRequestCameraPermission()
+        rootContainer.addView(
+            webView,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
 
+        ViewCompat.setOnApplyWindowInsetsListener(rootContainer) { view, insets ->
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or
+                    WindowInsetsCompat.Type.displayCutout()
+            )
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+
+            view.setPadding(
+                bars.left,
+                bars.top,
+                bars.right,
+                maxOf(bars.bottom, ime.bottom)
+            )
+
+            WindowInsetsCompat.CONSUMED
+        }
+
+        setContentView(rootContainer)
+
+        // Camera permission is requested only when the user opens the
+        // camera, not at startup.
         setupWebView()
 
         setupBackHandler()
@@ -229,22 +306,6 @@ class MainActivity : AppCompatActivity() {
         webView.loadUrl(
             appAssetUrl
         )
-    }
-
-    private fun checkAndRequestCameraPermission() {
-
-        if (
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.CAMERA
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPermissionLauncher.launch(
-                arrayOf(
-                    Manifest.permission.CAMERA
-                )
-            )
-        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -282,6 +343,12 @@ class MainActivity : AppCompatActivity() {
         val nativeBridge =
             NativeBridgeInterface(this)
 
+        val fileSaveBridge =
+            FileSaveBridge(
+                this,
+                webView
+            )
+
         val playBillingBridge =
             PlayBillingManager(
                 this,
@@ -307,6 +374,11 @@ class MainActivity : AppCompatActivity() {
         webView.addJavascriptInterface(
             googleSignInBridge,
             "AndroidGoogleSignIn"
+        )
+
+        webView.addJavascriptInterface(
+            fileSaveBridge,
+            "AndroidFileBridge"
         )
 
         webView.webChromeClient =
@@ -437,9 +509,33 @@ class MainActivity : AppCompatActivity() {
                     fileChooserCallback =
                         filePathCallback
 
-                    launchSystemMediaPicker(
-                        fileChooserParams
-                    )
+                    val hasCameraPermission =
+                        ContextCompat.checkSelfPermission(
+                            this@MainActivity,
+                            Manifest.permission.CAMERA
+                        ) == PackageManager.PERMISSION_GRANTED
+
+                    // Ask for camera access first so the camera option can
+                    // be offered; the picker still opens if it is denied.
+                    if (
+                        !hasCameraPermission &&
+                        packageManager.hasSystemFeature(
+                            PackageManager.FEATURE_CAMERA_ANY
+                        )
+                    ) {
+                        pendingFileChooserParams = fileChooserParams
+                        hasPendingFileChooser = true
+
+                        requestPermissionLauncher.launch(
+                            arrayOf(
+                                Manifest.permission.CAMERA
+                            )
+                        )
+                    } else {
+                        launchSystemMediaPicker(
+                            fileChooserParams
+                        )
+                    }
 
                     return true
                 }
@@ -449,10 +545,13 @@ class MainActivity : AppCompatActivity() {
                         ConsoleMessage?
                 ): Boolean {
 
-                    Log.d(
-                        "WebConsole",
-                        "[${consoleMessage?.messageLevel()}] ${consoleMessage?.message()}"
-                    )
+                    // Web console output is only logged in debug builds.
+                    if (isDebuggable) {
+                        Log.d(
+                            "WebConsole",
+                            "[${consoleMessage?.messageLevel()}] ${consoleMessage?.message()}"
+                        )
+                    }
 
                     return true
                 }
@@ -470,6 +569,27 @@ class MainActivity : AppCompatActivity() {
 
         webView.webViewClient =
             object : WebViewClient() {
+
+                // If the WebView renderer crashes or is killed to free
+                // memory, recreate the activity instead of crashing the app.
+                override fun onRenderProcessGone(
+                    view: WebView?,
+                    detail: RenderProcessGoneDetail?
+                ): Boolean {
+                    Log.e(tag, "WebView render process gone; recreating activity")
+
+                    try {
+                        (view?.parent as? ViewGroup)?.removeView(view)
+                        view?.destroy()
+                    } catch (_: Exception) {
+                    }
+
+                    if (!isFinishing && !isDestroyed) {
+                        recreate()
+                    }
+
+                    return true
+                }
 
                 override fun shouldInterceptRequest(
                     view: WebView?,
@@ -592,7 +712,14 @@ class MainActivity : AppCompatActivity() {
 
         var photoFile: File? = null
 
-        try {
+        val canUseCamera =
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED &&
+                takePictureIntent.resolveActivity(packageManager) != null
+
+        if (canUseCamera) try {
 
             val timeStamp =
                 SimpleDateFormat(
@@ -642,9 +769,28 @@ class MainActivity : AppCompatActivity() {
                 ex
             )
 
+            photoFile?.delete()
             photoFile = null
             currentCameraPhotoUri = null
         }
+
+        currentCameraPhotoFile = photoFile
+
+        // Honour the accept types and multi-select requested by the page.
+        val requestedTypes =
+            params?.acceptTypes
+                ?.flatMap { it.split(',') }
+                ?.map { it.trim().lowercase() }
+                ?.filter { it.contains('/') }
+                ?.distinct()
+                .orEmpty()
+
+        val mimeTypes =
+            if (requestedTypes.isNotEmpty()) requestedTypes.toTypedArray()
+            else arrayOf("image/*", "application/pdf")
+
+        val allowMultiple =
+            params?.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE
 
         val contentSelectionIntent =
             Intent(
@@ -659,10 +805,12 @@ class MainActivity : AppCompatActivity() {
 
                 putExtra(
                     Intent.EXTRA_MIME_TYPES,
-                    arrayOf(
-                        "image/*",
-                        "application/pdf"
-                    )
+                    mimeTypes
+                )
+
+                putExtra(
+                    Intent.EXTRA_ALLOW_MULTIPLE,
+                    allowMultiple
                 )
             }
 
@@ -696,9 +844,19 @@ class MainActivity : AppCompatActivity() {
                 )
             }
 
-        fileChooserLauncher.launch(
-            chooserIntent
-        )
+        try {
+            fileChooserLauncher.launch(
+                chooserIntent
+            )
+        } catch (e: Exception) {
+            Log.e(tag, "Unable to open file chooser", e)
+
+            fileChooserCallback?.onReceiveValue(null)
+            fileChooserCallback = null
+            currentCameraPhotoFile?.delete()
+            currentCameraPhotoFile = null
+            currentCameraPhotoUri = null
+        }
     }
 
     private fun setupBackHandler() {
@@ -748,11 +906,17 @@ class MainActivity : AppCompatActivity() {
 
                             } else {
 
+                                // Let the system handle back (close or
+                                // background the app), then re-enable so
+                                // in-app back works again after returning.
                                 isEnabled =
                                     false
 
                                 onBackPressedDispatcher
                                     .onBackPressed()
+
+                                isEnabled =
+                                    true
                             }
                         }
                     }
