@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { UserProfile, UsageStats, PlanTier, AdminUserItem } from '../types';
 import { logger } from '../utils/logger';
+import { restorePlayPurchases } from '../utils/playBilling';
 import {
   cancelNativeGoogleSignInTimeout,
   isNativeGoogleSignInAvailable,
@@ -811,51 +812,30 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const restoreGooglePlayPurchases = async () => {
-    try {
-      const res = await apiFetch(
-        '/api/billing/google-play/restore-purchases',
-        {
-          method: 'POST',
-          headers: getAuthHeaders(),
-          body: JSON.stringify({}),
-        }
-      );
+    const result = await restorePlayPurchases(getAuthHeaders());
 
-      const data = await res.json();
-
-      if (!res.ok) {
-        return {
-          success: false,
-          restored: false,
-          message:
-            data.error ||
-            'Failed to restore purchases.',
-        };
-      }
-
-      if (data.restored && data.user) {
-        setUser(data.user);
-      }
-
-      if (data.restored && data.usage) {
-        setUsage(data.usage);
-      }
-
-      return {
-        success: true,
-        restored: Boolean(data.restored),
-        message: data.message,
-      };
-    } catch {
+    if (!result.success) {
       return {
         success: false,
         restored: false,
-        message:
-          'Network error restoring purchases.',
+        message: result.message || 'Failed to restore purchases.',
       };
     }
-  };
 
+    if (result.restored && result.user) {
+      setUser(result.user);
+    }
+
+    if (result.restored && result.usage) {
+      setUsage(result.usage);
+    }
+
+    return {
+      success: true,
+      restored: result.restored,
+      message: result.message,
+    };
+  };
   const isPro = user?.plan === 'pro';
 
   const isLimitReached =
