@@ -2319,27 +2319,27 @@ app.post(
           .randomBytes(3)
           .toString('hex')
           .toUpperCase()}`;
-// Acknowledge the subscription only after Google Play verification.
-if (
-  subscription.acknowledgementState ===
-  'ACKNOWLEDGEMENT_STATE_PENDING'
-) {
-  await publisher.purchases.subscriptions.acknowledge({
-    packageName: expectedPackageName,
-    subscriptionId: verifiedSku,
-    token,
-    requestBody: {},
-  });
-}
 
-// Activate Pro only after successful verification and acknowledgement.
-const updated =
-  updateUserPlan(
-    user.id,
-    'pro',
-    expiryTime
-  );
-      
+      // Acknowledge the subscription only after Google Play verification.
+      if (
+        subscription.acknowledgementState ===
+        'ACKNOWLEDGEMENT_STATE_PENDING'
+      ) {
+        await publisher.purchases.subscriptions.acknowledge({
+          packageName: expectedPackageName,
+          subscriptionId: verifiedSku,
+          token,
+          requestBody: {},
+        });
+      }
+
+      // Activate Pro only after successful verification and acknowledgement.
+      const updated =
+        updateUserPlan(
+          user.id,
+          'pro',
+          expiryTime
+        );
 
       const purchaseRecord:
         GooglePlayPurchaseRecord =
@@ -2593,6 +2593,19 @@ app.post(
 
           if (!expiryTime) {
             continue;
+          }
+
+          // Acknowledge restored subscription after Google Play verification.
+          if (
+            subscription.acknowledgementState ===
+            'ACKNOWLEDGEMENT_STATE_PENDING'
+          ) {
+            await publisher.purchases.subscriptions.acknowledge({
+              packageName: 'com.aidocumenthelper.app',
+              subscriptionId: verifiedSku,
+              token,
+              requestBody: {},
+            });
           }
 
           const verifiedOrderId =
