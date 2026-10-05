@@ -33,9 +33,9 @@ class NativeBridgeInterface(private val context: Context) {
         return try {
             context.packageManager
                 .getPackageInfo(context.packageName, 0)
-                .versionName ?: "1.0.0"
+                .versionName ?: "1.0.1"
         } catch (_: Exception) {
-            "1.0.0"
+            "1.0.1"
         }
     }
 

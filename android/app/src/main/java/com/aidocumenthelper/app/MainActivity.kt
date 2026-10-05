@@ -144,7 +144,7 @@ class MainActivity : AppCompatActivity() {
         settings.cacheMode = WebSettings.LOAD_DEFAULT
 
         // Append custom user agent marker so web layer easily detects native Android app
-        val customUserAgent = "${settings.userAgentString} AIDocumentHelperApp/1.0.0 (Android)"
+        val customUserAgent = "${settings.userAgentString} AIDocumentHelperApp/1.0.1 (Android)"
         settings.userAgentString = customUserAgent
 
         // Inject Native Bridges

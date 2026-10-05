@@ -676,7 +676,6 @@ export function incrementDailyUsage(identifier: string): number {
 export const GOOGLE_PLAY_SKUS = {
   MONTHLY: 'ai_doc_pro_monthly',
   ANNUAL: 'ai_doc_pro_annual',
-  LIFETIME: 'ai_doc_pro_lifetime',
 } as const;
 
 export function isValidGooglePlaySku(sku: string): boolean {

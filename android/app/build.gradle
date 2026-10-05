@@ -11,8 +11,16 @@ android {
         applicationId "com.aidocumenthelper.app"
         minSdk 24
         targetSdk 36
-        versionCode (System.getenv("VERSION_CODE") ? Integer.parseInt(System.getenv("VERSION_CODE")) : 4)
-        versionName (System.getenv("VERSION_NAME") ?: "1.0.0")
+
+        def isReleaseTask = gradle.startParameter.taskNames.any { it.toLowerCase().contains("release") }
+        if (isReleaseTask && (!System.getenv("VERSION_CODE") || !System.getenv("VERSION_NAME"))) {
+            throw new GradleException("ERROR: VERSION_CODE and VERSION_NAME environment variables are mandatory for release builds.")
+        }
+
+        def vCode = System.getenv("VERSION_CODE") ? Integer.parseInt(System.getenv("VERSION_CODE")) : 8
+        def vName = System.getenv("VERSION_NAME") ?: "1.0.1"
+        versionCode vCode
+        versionName vName
 
         def prodUrl = System.getenv("PRODUCTION_API_BASE_URL") ?: System.getenv("VITE_API_BASE_URL") ?: ""
         resValue "string", "production_web_url", prodUrl

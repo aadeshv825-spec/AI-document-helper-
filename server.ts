@@ -46,6 +46,10 @@ import {
   verifyGoogleIdTokenForSignIn,
   verifyPubSubPushToken,
 } from './server/googleIdToken.ts';
+import {
+  verifySubscriptionWithGooglePlay,
+  PLAY_PACKAGE_NAME,
+} from './server/googlePlayPublisher.ts';
 
 dotenv.config();
 
@@ -1524,7 +1528,7 @@ app.get('/api/billing/google-play/config', (req, res) => {
 });
 
 // Google Play Purchase Verification & Automatic Pro Activation
-app.post('/api/billing/google-play/verify-purchase', (req, res) => {
+app.post('/api/billing/google-play/verify-purchase', async (req, res) => {
   const { user } = getAuthContext(req);
   if (!user) {
     return res.status(401).json({
@@ -1532,10 +1536,18 @@ app.post('/api/billing/google-play/verify-purchase', (req, res) => {
     });
   }
 
-  const { purchaseToken, sku, orderId, packageName } = req.body;
+  const { purchaseToken, sku, packageName } = req.body;
 
   if (!purchaseToken || typeof purchaseToken !== 'string' || purchaseToken.trim().length === 0) {
     return res.status(400).json({ error: 'Valid Google Play purchase token is required.' });
+  }
+
+  const cleanToken = purchaseToken.trim();
+
+  // Enforce package name
+  const targetPackage = packageName || PLAY_PACKAGE_NAME;
+  if (targetPackage !== PLAY_PACKAGE_NAME) {
+    return res.status(400).json({ error: `Invalid package name: "${targetPackage}". Expected "${PLAY_PACKAGE_NAME}".` });
   }
 
   if (!sku || !isValidGooglePlaySku(sku)) {
@@ -1544,50 +1556,60 @@ app.post('/api/billing/google-play/verify-purchase', (req, res) => {
     });
   }
 
-  if (packageName && packageName !== 'com.aidocumenthelper.app') {
-    return res.status(400).json({ error: 'Invalid package name.' });
-  }
-
-  // Check for token replay on a different account
-  const existingRecord = findGooglePlayPurchaseByToken(purchaseToken.trim());
+  // Cross-account token replay check: ensure token is never transferred to another user
+  const existingRecord = findGooglePlayPurchaseByToken(cleanToken);
   if (existingRecord && existingRecord.userId !== user.id) {
     return res.status(409).json({
       error: 'This Google Play purchase token has already been associated with another user account.',
     });
   }
 
-  // Calculate Pro duration based on purchased SKU
-  let durationMs = 31 * 86400000; // default 1 month
-  if (sku === GOOGLE_PLAY_SKUS.ANNUAL) {
-    durationMs = 366 * 86400000; // 1 year
-  } else if (sku === GOOGLE_PLAY_SKUS.LIFETIME) {
-    durationMs = 100 * 365 * 86400000;
+  // Query authoritative current state from Google Play Developer API
+  const verification = await verifySubscriptionWithGooglePlay(
+    PLAY_PACKAGE_NAME,
+    sku,
+    cleanToken
+  );
+
+  if (!verification.valid) {
+    return res.status(400).json({
+      error: verification.errorMessage || 'Failed to verify subscription with Google Play.',
+      status: verification.status,
+    });
   }
 
-  const proUntil = Date.now() + durationMs;
+  const now = Date.now();
+  if (verification.expiryTimeMillis <= now) {
+    return res.status(400).json({
+      error: 'Subscription has expired according to Google Play records.',
+      status: 'EXPIRED',
+    });
+  }
 
-  // 1. Automatically activate Pro on user profile
+  // Authoritative expiry time from Google Play
+  const proUntil = verification.expiryTimeMillis;
+
+  // 1. Activate Pro on user profile using authoritative Google expiry
   const updated = updateUserPlan(user.id, 'pro', proUntil);
 
   // 2. Persist verified purchase audit record
-  const generatedOrderId = orderId || `GPA.${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
   const purchaseRecord: GooglePlayPurchaseRecord = {
-    id: `gp_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+    id: existingRecord?.id || `gp_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
     userId: user.id,
-    purchaseToken: purchaseToken.trim(),
-    sku,
-    orderId: generatedOrderId,
-    packageName: packageName || 'com.aidocumenthelper.app',
-    purchaseTime: Date.now(),
+    purchaseToken: cleanToken,
+    sku: verification.subscriptionId,
+    orderId: verification.orderId,
+    packageName: verification.packageName,
+    purchaseTime: verification.purchaseTimeMillis,
     expiryTime: proUntil,
     state: 'VERIFIED',
-    verifiedAt: Date.now(),
+    verifiedAt: now,
   };
   recordGooglePlayPurchase(purchaseRecord);
 
   const usage = getDailyUsage(user.id, true);
 
-  console.log(`[Google Play Billing] Successfully verified purchase for user ${user.email} (${user.id}), SKU: ${sku}, Order: ${generatedOrderId}`);
+  console.log(`[Google Play Billing] Verified purchase for user ${user.id}, SKU: ${verification.subscriptionId}, Order: ${verification.orderId}`);
 
   res.json({
     success: true,
@@ -1598,75 +1620,85 @@ app.post('/api/billing/google-play/verify-purchase', (req, res) => {
   });
 });
 
-// Restore Google Play Purchases
-app.post('/api/billing/google-play/restore-purchases', (req, res) => {
+// Restore Google Play Purchases (Real Server-to-Server Verification)
+app.post('/api/billing/google-play/restore-purchases', async (req, res) => {
   const { user } = getAuthContext(req);
   if (!user) {
     return res.status(401).json({ error: 'Please sign in to restore your purchases.' });
   }
 
   const { purchaseTokens, purchases: devicePurchases } = req.body;
-  const userPurchases = getUserGooglePlayPurchases(user.id);
+  const tokensToVerify = new Set<string>();
 
-  // Check if any matching or user-bound purchase is still active
-  const now = Date.now();
-  let activePurchase = userPurchases.find((p) => p.state === 'VERIFIED' && (!p.expiryTime || p.expiryTime > now));
-
-  // If specific tokens were submitted from device, check them too
-  if (!activePurchase && Array.isArray(purchaseTokens)) {
-    for (const token of purchaseTokens) {
-      if (!token || typeof token !== 'string') continue;
-      const record = findGooglePlayPurchaseByToken(token.trim());
-      if (record && record.userId === user.id && (!record.expiryTime || record.expiryTime > now)) {
-        activePurchase = record;
-        break;
-      }
+  if (Array.isArray(purchaseTokens)) {
+    for (const t of purchaseTokens) {
+      if (typeof t === 'string' && t.trim()) tokensToVerify.add(t.trim());
     }
   }
 
-  // If device query returned purchases from Android BillingClient, process and verify them
-  if (!activePurchase && Array.isArray(devicePurchases)) {
+  if (Array.isArray(devicePurchases)) {
     for (const dp of devicePurchases) {
-      const token = (dp.purchaseToken || dp.token || '').trim();
-      const sku = (Array.isArray(dp.products) ? dp.products[0] : (dp.sku || dp.productId || '')).trim();
-      if (!token || !sku || !isValidGooglePlaySku(sku)) continue;
+      const t = (dp?.purchaseToken || dp?.token || '').trim();
+      if (t) tokensToVerify.add(t);
+    }
+  }
 
-      // Replay protection: ensure token is not associated with another user
-      const existing = findGooglePlayPurchaseByToken(token);
-      if (existing && existing.userId !== user.id) {
-        console.warn(`[Google Play Restore] Token already associated with user ${existing.userId}, skipping.`);
-        continue;
-      }
+  // Also verify previously recorded purchase tokens for this user
+  const userExistingPurchases = getUserGooglePlayPurchases(user.id);
+  for (const p of userExistingPurchases) {
+    if (p.purchaseToken) tokensToVerify.add(p.purchaseToken);
+  }
 
-      let durationMs = 31 * 86400000;
-      if (sku === GOOGLE_PLAY_SKUS.ANNUAL) durationMs = 366 * 86400000;
-      else if (sku === GOOGLE_PLAY_SKUS.LIFETIME) durationMs = 100 * 365 * 86400000;
+  let activePurchase: GooglePlayPurchaseRecord | null = null;
+  const now = Date.now();
 
-      const purchaseTime = dp.purchaseTime ? Number(dp.purchaseTime) : now;
-      const proUntil = purchaseTime + durationMs;
+  for (const token of tokensToVerify) {
+    // Cross-account protection: do not allow restoring tokens owned by another user
+    const existing = findGooglePlayPurchaseByToken(token);
+    if (existing && existing.userId !== user.id) {
+      continue;
+    }
 
-      if (proUntil > now) {
-        const generatedOrderId = dp.orderId || `GPA.${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
-        const newRecord: GooglePlayPurchaseRecord = {
-          id: existing ? existing.id : `gp_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+    // Determine SKU to query with Google Play
+    let candidateSku = existing?.sku;
+    if (!candidateSku && Array.isArray(devicePurchases)) {
+      const match = devicePurchases.find((dp) => (dp?.purchaseToken || dp?.token || '').trim() === token);
+      candidateSku = Array.isArray(match?.products) ? match.products[0] : (match?.sku || match?.productId || '');
+    }
+
+    const skusToCheck = candidateSku && isValidGooglePlaySku(candidateSku)
+      ? [candidateSku]
+      : [GOOGLE_PLAY_SKUS.MONTHLY, GOOGLE_PLAY_SKUS.ANNUAL];
+
+    for (const sku of skusToCheck) {
+      const result = await verifySubscriptionWithGooglePlay(PLAY_PACKAGE_NAME, sku, token);
+      if (result.valid && result.expiryTimeMillis > now) {
+        const record: GooglePlayPurchaseRecord = {
+          id: existing?.id || `gp_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
           userId: user.id,
           purchaseToken: token,
-          sku,
-          orderId: generatedOrderId,
-          packageName: dp.packageName || 'com.aidocumenthelper.app',
-          purchaseTime,
-          expiryTime: proUntil,
+          sku: result.subscriptionId,
+          orderId: result.orderId,
+          packageName: result.packageName,
+          purchaseTime: result.purchaseTimeMillis,
+          expiryTime: result.expiryTimeMillis,
           state: 'VERIFIED',
           verifiedAt: now,
         };
-        recordGooglePlayPurchase(newRecord);
-        activePurchase = newRecord;
+        recordGooglePlayPurchase(record);
+        if (!activePurchase || (record.expiryTime && (!activePurchase.expiryTime || record.expiryTime > activePurchase.expiryTime))) {
+          activePurchase = record;
+        }
         break;
+      } else if (existing && (result.status === 'EXPIRED' || result.status === 'REVOKED')) {
+        existing.state = result.status;
+        existing.expiryTime = result.expiryTimeMillis;
+        recordGooglePlayPurchase(existing);
       }
     }
   }
 
-  if (activePurchase) {
+  if (activePurchase && activePurchase.expiryTime && activePurchase.expiryTime > now) {
     const updated = updateUserPlan(user.id, 'pro', activePurchase.expiryTime);
     const usage = getDailyUsage(user.id, true);
     return res.json({
@@ -1677,6 +1709,11 @@ app.post('/api/billing/google-play/restore-purchases', (req, res) => {
       usage,
       purchase: activePurchase,
     });
+  }
+
+  // If no active purchase is found, ensure user is not marked Pro if their previous subscription expired
+  if (user.plan === 'pro' && (!user.proUntil || user.proUntil <= now)) {
+    updateUserPlan(user.id, 'free');
   }
 
   res.json({
@@ -1854,7 +1891,110 @@ app.post('/api/billing/google-play/rtdn', async (req, res) => {
     return res.status(401).json({ error: 'Invalid Pub/Sub push authentication token.' });
   }
 
-  res.status(200).json({ success: true });
+  const message = req.body?.message;
+  if (!message || !message.data) {
+    return res.status(400).json({ error: 'Missing Pub/Sub message data.' });
+  }
+
+  let notificationData: any;
+  try {
+    const decoded = Buffer.from(message.data, 'base64').toString('utf8');
+    notificationData = JSON.parse(decoded);
+  } catch (err: any) {
+    console.error('[RTDN] Failed to parse Pub/Sub payload:', err?.message);
+    return res.status(400).json({ error: 'Malformed notification data.' });
+  }
+
+  // 1. Test notification handling
+  if (notificationData.testNotification) {
+    console.log('[RTDN] Processed Google Play test notification');
+    return res.status(200).json({ success: true, test: true });
+  }
+
+  // 2. Package verification
+  if (notificationData.packageName && notificationData.packageName !== PLAY_PACKAGE_NAME) {
+    console.warn(`[RTDN] Ignoring notification for external package: ${notificationData.packageName}`);
+    return res.status(200).json({ success: true, ignored: true });
+  }
+
+  // 3. Process Subscription Notification
+  const subNotification = notificationData.subscriptionNotification;
+  if (subNotification) {
+    const { notificationType, purchaseToken, subscriptionId } = subNotification;
+    if (!purchaseToken) {
+      return res.status(200).json({ success: true, ignored: true });
+    }
+
+    const cleanToken = String(purchaseToken).trim();
+    const cleanSku = subscriptionId ? String(subscriptionId).trim() : '';
+
+    // Re-verify authoritative current state from Google Play Developer API
+    const verification = await verifySubscriptionWithGooglePlay(
+      PLAY_PACKAGE_NAME,
+      cleanSku || GOOGLE_PLAY_SKUS.MONTHLY,
+      cleanToken
+    );
+
+    const existingRecord = findGooglePlayPurchaseByToken(cleanToken);
+    const now = Date.now();
+
+    // 1: SUBSCRIPTION_RECOVERED, 2: SUBSCRIPTION_RENEWED, 3: SUBSCRIPTION_CANCELED,
+    // 4: SUBSCRIPTION_PURCHASED, 12: SUBSCRIPTION_REVOKED, 13: SUBSCRIPTION_EXPIRED
+    const isRevokedOrExpired =
+      notificationType === 12 ||
+      notificationType === 13 ||
+      !verification.valid ||
+      verification.status === 'EXPIRED' ||
+      verification.status === 'REVOKED' ||
+      verification.expiryTimeMillis <= now;
+
+    if (existingRecord) {
+      if (isRevokedOrExpired) {
+        existingRecord.state = notificationType === 12 || verification.status === 'REVOKED' ? 'REVOKED' : 'EXPIRED';
+        if (verification.expiryTimeMillis) existingRecord.expiryTime = verification.expiryTimeMillis;
+        recordGooglePlayPurchase(existingRecord);
+
+        // Check if user has any other active Pro purchase before downgrading
+        const userOtherPurchases = getUserGooglePlayPurchases(existingRecord.userId);
+        const hasOtherActive = userOtherPurchases.some(
+          (p) => p.purchaseToken !== cleanToken && p.state === 'VERIFIED' && p.expiryTime && p.expiryTime > now
+        );
+        if (!hasOtherActive) {
+          updateUserPlan(existingRecord.userId, 'free');
+          console.log(`[RTDN] User ${existingRecord.userId} Pro status removed (notificationType: ${notificationType})`);
+        }
+      } else {
+        // Active / Renewed
+        existingRecord.state = 'VERIFIED';
+        existingRecord.expiryTime = verification.expiryTimeMillis;
+        existingRecord.orderId = verification.orderId || existingRecord.orderId;
+        existingRecord.sku = verification.subscriptionId || existingRecord.sku;
+        recordGooglePlayPurchase(existingRecord);
+
+        updateUserPlan(existingRecord.userId, 'pro', verification.expiryTimeMillis);
+        console.log(`[RTDN] User ${existingRecord.userId} Pro renewed until ${new Date(verification.expiryTimeMillis).toISOString()}`);
+      }
+    } else {
+      // Record unlinked verified purchase so user can claim it upon signing in
+      if (verification.valid && verification.expiryTimeMillis > now) {
+        const pendingRecord: GooglePlayPurchaseRecord = {
+          id: `gp_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+          userId: 'pending',
+          purchaseToken: cleanToken,
+          sku: verification.subscriptionId,
+          orderId: verification.orderId,
+          packageName: PLAY_PACKAGE_NAME,
+          purchaseTime: verification.purchaseTimeMillis,
+          expiryTime: verification.expiryTimeMillis,
+          state: 'VERIFIED',
+          verifiedAt: now,
+        };
+        recordGooglePlayPurchase(pendingRecord);
+      }
+    }
+  }
+
+  res.status(200).json({ success: true, processed: true });
 });
 
 // Fallback for API routes that do not match: return clean JSON 404 instead of HTML
