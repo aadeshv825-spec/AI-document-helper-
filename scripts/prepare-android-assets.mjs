@@ -59,6 +59,8 @@ if (indexHtml.includes('/src/main.tsx')) {
 const forbiddenNames = /\.(zip|tar\.gz|jks|keystore|p12|pfx|pem|key|der|map)$|server\.cjs|service-account|credentials/i;
 const forbiddenContent = [
   { pattern: /ais-dev-[a-z0-9-]+\.run\.app/i, label: 'development backend URL' },
+  { pattern: /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?/i, label: 'localhost / loopback URL' },
+  { pattern: /https?:\/\/[a-z0-9.-]*placeholder[a-z0-9.-]*/i, label: 'placeholder backend URL' },
   { pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/, label: 'private key' },
   { pattern: /"type"\s*:\s*"service_account"/, label: 'service account key' },
   { pattern: /AI Studio/i, label: 'AI Studio branding' },

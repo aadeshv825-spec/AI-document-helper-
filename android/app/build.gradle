@@ -14,6 +14,9 @@ android {
         versionCode (System.getenv("VERSION_CODE") ? Integer.parseInt(System.getenv("VERSION_CODE")) : 4)
         versionName (System.getenv("VERSION_NAME") ?: "1.0.0")
 
+        def prodUrl = System.getenv("PRODUCTION_API_BASE_URL") ?: System.getenv("VITE_API_BASE_URL") ?: ""
+        resValue "string", "production_web_url", prodUrl
+
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary true
@@ -23,24 +26,17 @@ android {
     signingConfigs {
         release {
             def uploadKeystore = file("upload-keystore.jks")
-            def envKeystore = System.getenv("KEYSTORE_FILE") ? file(System.getenv("KEYSTORE_FILE")) : null
-            def localKeystore = file("release.keystore")
-
             if (uploadKeystore.exists()) {
+                def password = System.getenv("NEW_UPLOAD_KEY_PASSWORD") ?: ""
+                if (password.isEmpty() && gradle.startParameter.taskNames.any { it.contains("Release") }) {
+                    throw new GradleException("ERROR: NEW_UPLOAD_KEY_PASSWORD is required to sign release AAB.")
+                }
                 storeFile uploadKeystore
-                storePassword System.getenv("NEW_UPLOAD_KEY_PASSWORD") ?: System.getenv("KEYSTORE_PASSWORD")
-                keyAlias System.getenv("KEY_ALIAS") ?: "upload"
-                keyPassword System.getenv("NEW_UPLOAD_KEY_PASSWORD") ?: System.getenv("KEY_PASSWORD") ?: System.getenv("KEYSTORE_PASSWORD")
-            } else if (envKeystore && envKeystore.exists()) {
-                storeFile envKeystore
-                storePassword System.getenv("KEYSTORE_PASSWORD")
-                keyAlias System.getenv("KEY_ALIAS") ?: "aidocumenthelper"
-                keyPassword System.getenv("KEY_PASSWORD") ?: System.getenv("KEYSTORE_PASSWORD")
-            } else if (localKeystore.exists()) {
-                storeFile localKeystore
-                storePassword System.getenv("KEYSTORE_PASSWORD")
-                keyAlias System.getenv("KEY_ALIAS") ?: "aidocumenthelper"
-                keyPassword System.getenv("KEY_PASSWORD") ?: System.getenv("KEYSTORE_PASSWORD")
+                storePassword password
+                keyAlias "upload"
+                keyPassword password
+            } else if (gradle.startParameter.taskNames.any { it.contains("Release") }) {
+                throw new GradleException("ERROR: Production release signing requires upload-keystore.jks. The old compromised release.keystore is forbidden.")
             }
         }
     }

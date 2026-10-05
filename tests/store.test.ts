@@ -73,3 +73,15 @@ test('write confirmation reports JSON storage success', async () => {
   store.registerUser('C', `c${Date.now()}@example.com`, 'pass-cccc-1');
   assert.equal(await store.confirmPersisted(mark), true);
 });
+
+test('expired Pro subscription becomes Free and isUserPro returns false', () => {
+  const email = `pro_exp_${Date.now()}@example.com`;
+  const { user } = store.registerUser('Pro Exp User', email, 'pass-pro-1') as any;
+  store.updateUserPlan(user.id, 'pro', Date.now() - 5000); // expired 5 seconds ago
+  const updatedUser = store.getUserById(user.id);
+  assert.equal(store.isUserPro(updatedUser), false);
+
+  store.updateUserPlan(user.id, 'pro', Date.now() + 3600000); // active for 1 hr
+  const activeUser = store.getUserById(user.id);
+  assert.equal(store.isUserPro(activeUser), true);
+});

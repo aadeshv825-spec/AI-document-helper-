@@ -17,18 +17,26 @@ declare global {
  * paths when hosted in a regular web browser.
  */
 export function getApiBaseUrl(): string {
+  // 1. Build-time environment variable injected by Vite
+  const envUrl = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL)
+    ? String(import.meta.env.VITE_API_BASE_URL).trim()
+    : '';
+  if (envUrl && envUrl.startsWith('https://')) {
+    return envUrl.replace(/\/$/, '');
+  }
+
   if (typeof window === 'undefined') return '';
 
-  // 1. Explicit global API Base URL (if defined)
-  if (window.API_BASE_URL && window.API_BASE_URL.startsWith('http')) {
+  // 2. Explicit global API Base URL (if defined on window)
+  if (window.API_BASE_URL && window.API_BASE_URL.startsWith('https://')) {
     return window.API_BASE_URL.replace(/\/$/, '');
   }
 
-  // 2. Query from native Android bridge if available
+  // 3. Query from native Android bridge if available
   if (window.AndroidBridge && typeof (window.AndroidBridge as any).getApiBaseUrl === 'function') {
     try {
       const nativeUrl = (window.AndroidBridge as any).getApiBaseUrl();
-      if (nativeUrl && typeof nativeUrl === 'string' && nativeUrl.startsWith('http')) {
+      if (nativeUrl && typeof nativeUrl === 'string' && nativeUrl.startsWith('https://')) {
         return nativeUrl.replace(/\/$/, '');
       }
     } catch {
@@ -36,17 +44,7 @@ export function getApiBaseUrl(): string {
     }
   }
 
-  // 3. Fallback for Android custom asset scheme or file protocol
-  const origin = window.location.origin || '';
-  if (
-    origin.includes('appassets.androidplatform.net') ||
-    origin.startsWith('file:') ||
-    origin === 'null'
-  ) {
-    return 'https://ais-dev-gq2p2ijj6ei7rg6rotit6q-119321813297.asia-southeast1.run.app';
-  }
-
-  // 4. Default in regular web browser / cloud preview: use same origin
+  // 4. Default in regular web browser / cloud preview: use same origin (relative paths)
   return '';
 }
 

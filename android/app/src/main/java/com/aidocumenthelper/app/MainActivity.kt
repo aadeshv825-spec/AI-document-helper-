@@ -108,19 +108,8 @@ class MainActivity : AppCompatActivity() {
         setupWebView()
         setupBackHandler()
 
-        // Read production web URL from resources if defined
-        try {
-            remoteUrl = getString(R.string.production_web_url)
-        } catch (e: Exception) {
-            Log.w(tag, "production_web_url string not found, using default local assets")
-        }
-
-        // Try production URL first if configured; fallback will load secure local assets
-        if (remoteUrl.isNotBlank() && remoteUrl.startsWith("http")) {
-            webView.loadUrl(remoteUrl)
-        } else {
-            webView.loadUrl(localAssetUrl)
-        }
+        // Always load verified local bundled assets served over custom scheme domain
+        webView.loadUrl(localAssetUrl)
     }
 
     private fun checkAndRequestPermissions() {
@@ -144,10 +133,10 @@ class MainActivity : AppCompatActivity() {
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
         settings.databaseEnabled = true
-        settings.allowFileAccess = true
+        settings.allowFileAccess = false
         settings.allowContentAccess = true
-        settings.allowFileAccessFromFileURLs = true
-        settings.allowUniversalAccessFromFileURLs = true
+        settings.allowFileAccessFromFileURLs = false
+        settings.allowUniversalAccessFromFileURLs = false
         settings.mediaPlaybackRequiresUserGesture = false
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
         settings.useWideViewPort = true
@@ -219,7 +208,18 @@ class MainActivity : AppCompatActivity() {
                     return true
                 }
 
-                // Keep app navigation inside WebView
+                // Only allow trusted local asset host to load inside WebView; all external URLs open safely in system browser
+                if (host != "appassets.androidplatform.net") {
+                    try {
+                        val intent = Intent(Intent.ACTION_VIEW, url)
+                        startActivity(intent)
+                    } catch (_: Exception) {
+                        // ignore unhandled schemes
+                    }
+                    return true
+                }
+
+                // Keep verified app navigation inside WebView
                 return false
             }
 

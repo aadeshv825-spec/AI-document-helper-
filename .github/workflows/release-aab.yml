@@ -27,7 +27,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Validate release inputs
         run: |
@@ -35,6 +35,7 @@ jobs:
             echo "ERROR: version_code must be a whole number greater than 7 (the highest versionCode in this repository's history)."
             exit 1
           fi
+          echo "Note: Verified version_code ($VERSION_CODE) is greater than repository baseline (7). Verify in Google Play Console that this exceeds all released track versions."
           if ! [[ "$VERSION_NAME" =~ ^[0-9A-Za-z.+-]{1,32}$ ]]; then
             echo "ERROR: version_name is invalid."
             exit 1
@@ -45,7 +46,7 @@ jobs:
           fi
 
       - name: Set up Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
           node-version: '22'
           cache: npm
@@ -66,7 +67,7 @@ jobs:
         run: npm run android:assets
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@8df10395026330078e675018603f64be3be7c470 # v4.5.0
         with:
           distribution: temurin
           java-version: '17'
@@ -126,6 +127,7 @@ jobs:
           test -f "$AAB"
 
           curl -sSL -o bundletool.jar https://github.com/google/bundletool/releases/download/1.18.1/bundletool-all-1.18.1.jar
+          echo "675786493983787ffa11550bdb7c0715679a44e1643f3ff980a529e9c822595c  bundletool.jar" | sha256sum -c -
 
           PKG=$(java -jar bundletool.jar dump manifest --bundle "$AAB" --xpath /manifest/@package)
           VC=$(java -jar bundletool.jar dump manifest --bundle "$AAB" --xpath /manifest/@android:versionCode)
@@ -141,24 +143,30 @@ jobs:
           echo "AAB signing certificate SHA-256: $AAB_SHA256"
           [ "$AAB_SHA256" = "$(cat keystore-sha256.txt)" ] || { echo "ERROR: AAB not signed with the upload keystore"; exit 1; }
 
-          if [ -n "${EXPECTED_UPLOAD_CERT_SHA256:-}" ]; then
-            [ "$AAB_SHA256" = "$EXPECTED_UPLOAD_CERT_SHA256" ] || { echo "ERROR: AAB certificate does not match the Play-approved upload certificate"; exit 1; }
-            echo "AAB certificate matches EXPECTED_UPLOAD_CERT_SHA256."
-          else
-            echo "WARNING: EXPECTED_UPLOAD_CERT_SHA256 is not set; cannot confirm this is the Play-approved upload certificate."
+          if [ -z "${EXPECTED_UPLOAD_CERT_SHA256:-}" ]; then
+            echo "ERROR: EXPECTED_UPLOAD_CERT_SHA256 repository variable is required for production release. Release failed."
+            exit 1
           fi
+
+          NORM_AAB=$(echo "$AAB_SHA256" | tr -d ' :' | tr '[:lower:]' '[:upper:]')
+          NORM_EXPECTED=$(echo "$EXPECTED_UPLOAD_CERT_SHA256" | tr -d ' :' | tr '[:lower:]' '[:upper:]')
+          if [ "$NORM_AAB" != "$NORM_EXPECTED" ]; then
+            echo "ERROR: AAB upload certificate ($NORM_AAB) does not match EXPECTED_UPLOAD_CERT_SHA256 ($NORM_EXPECTED)"
+            exit 1
+          fi
+          echo "AAB certificate verified: matches EXPECTED_UPLOAD_CERT_SHA256."
 
           mkdir -p aab-check && cd aab-check && unzip -q "../$AAB"
           if find . -type f \( -name '*.jks' -o -name '*.keystore' -o -name '*.p12' -o -name '*.pem' -o -name 'server.cjs*' -o -name '*.map' \) | grep -q .; then
             echo "ERROR: forbidden file inside AAB"; exit 1
           fi
-          if grep -rIl -E "ais-dev-[a-z0-9-]+\.run\.app|BEGIN [A-Z ]*PRIVATE KEY" base/assets 2>/dev/null | grep -q .; then
+          if grep -rIl -E "ais-dev-[a-z0-9-]+\.run\.app|localhost|127\.0\.0\.1|BEGIN [A-Z ]*PRIVATE KEY" base/assets 2>/dev/null | grep -q .; then
             echo "ERROR: development URL or private key inside AAB assets"; exit 1
           fi
           echo "AAB content checks passed."
 
       - name: Upload Release AAB
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: ai-document-helper-release-aab-${{ inputs.version_code }}
           path: android/app/build/outputs/bundle/release/app-release.aab

@@ -274,3 +274,31 @@ test('login brute force is rate limited', async () => {
   }
   assert.equal(limited, true);
 });
+
+test('safe error messages never leak filesystem paths, stack traces, or environment keys', async () => {
+  const u = await registerUser(server);
+  const res = await api(server, 'POST', '/api/photo-to-text', { imageBase64: 'dGVzdA==', mimeType: 'image/jpeg' }, u.token);
+  assert.ok(res.status >= 400);
+  const errorText = JSON.stringify(res.data);
+  assert.ok(!errorText.includes('GEMINI_API_KEY'));
+  assert.ok(!errorText.includes('/app/'));
+  assert.ok(!errorText.includes('node:internal'));
+  assert.ok(!errorText.includes('stack'));
+});
+
+test('invalid package name in purchase verification is rejected', async () => {
+  const u = await registerUser(server);
+  const res = await api(server, 'POST', '/api/billing/google-play/verify-purchase', {
+    purchaseToken: `tok_${Date.now()}`,
+    sku: 'ai_doc_pro_monthly',
+    packageName: 'com.evil.impostor',
+  }, u.token);
+  assert.equal(res.status, 400);
+});
+
+test('apiClient getApiBaseUrl has no development url fallback', async () => {
+  const { getApiBaseUrl } = await import('../src/utils/apiClient.ts');
+  const url = getApiBaseUrl();
+  assert.ok(!url.includes('ais-dev-'), 'must never fall back to ais-dev url');
+  assert.ok(!url.includes('localhost'), 'must never fall back to localhost');
+});

@@ -56,6 +56,7 @@ if (process.env.REQUIRE_DATABASE === 'true' && (!process.env.DATABASE_URL || pro
 }
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = process.env.NGINX_PORT 
   ? (Number(process.env.DEFAULT_APP_PORT) || 3000) 
   : (Number(process.env.PORT) || 3000);
@@ -112,10 +113,7 @@ app.use(express.urlencoded({ extended: true, limit: '30mb' }));
 
 // Global API rate limiting middleware for abuse prevention
 app.use('/api/', (req, res, next) => {
-  const rawIp = req.headers['x-forwarded-for'];
-  const ip = typeof rawIp === 'string'
-    ? rawIp.split(',')[0].trim()
-    : (req.socket.remoteAddress || '127.0.0.1');
+  const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
   const { allowed, retryAfter } = checkRateLimit(ip, 120);
   if (!allowed) {
     return res.status(429).json({
@@ -132,10 +130,7 @@ function getAuthContext(req: express.Request): { user: StoredUser | null; identi
   const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
   const user = token ? getUserByToken(token) : null;
   const clientId = (req.headers['x-client-id'] as string) || '';
-  const rawIp = req.headers['x-forwarded-for'];
-  const ip = typeof rawIp === 'string'
-    ? rawIp.split(',')[0].trim()
-    : (req.socket.remoteAddress || '127.0.0.1');
+  const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
 
   const identifier = user ? user.id : (clientId ? `client_${clientId}` : `ip_${ip}`);
   const isPro = isUserPro(user);
@@ -158,7 +153,7 @@ function checkAiUsage(req: express.Request, res: express.Response): { user: Stor
   if (!canPerformAiAction(authCtx.identifier, authCtx.isPro)) {
     const currentUsage = getDailyUsage(authCtx.identifier, authCtx.isPro);
     res.status(429).json({
-      error: 'Daily free limit reached (5/5). Upgrade to Pro or start your 30-day trial for unlimited AI actions.',
+      error: 'Daily free limit reached (5/5 actions used today). Upgrade to Pro for unlimited AI actions.',
       isLimitReached: true,
       usage: currentUsage,
     });
@@ -217,17 +212,20 @@ function parseJsonFromText(rawText: string): any {
 let preferredModel = 'gemini-3.8-flash';
 
 function getSafeAiErrorMessage(err: any, fallback: string): string {
-  const msg = err?.message || String(err || '');
-  if (
-    msg.includes('GEMINI_API_KEY') ||
-    msg.includes('API_KEY') ||
-    msg.includes('apiKey') ||
-    msg.includes('key not configured') ||
-    msg.includes('MY_GEMINI_API_KEY')
-  ) {
-    return 'AI service is temporarily unavailable. Please verify API configuration.';
+  const msg = typeof err?.message === 'string' ? err.message : String(err || '');
+
+  if (msg.includes('timed out') || msg.includes('timeout')) {
+    return 'The request timed out. Please try again with a shorter document or simpler prompt.';
   }
-  return msg || fallback;
+  if (msg.includes('maximum length') || msg.includes('too large') || msg.includes('exceeds')) {
+    return 'The provided content exceeds the maximum allowed size. Please shorten it and try again.';
+  }
+  if (msg.includes('quota') || msg.includes('rate limit') || msg.includes('RESOURCE_EXHAUSTED')) {
+    return 'AI service is temporarily busy. Please wait a moment and try again.';
+  }
+
+  // Never return raw technical errors, stack traces, paths, or keys to the client
+  return fallback || 'AI service is temporarily unavailable. Please try again.';
 }
 
 async function generateWithModelFallback(params: {
@@ -1544,6 +1542,10 @@ app.post('/api/billing/google-play/verify-purchase', (req, res) => {
     return res.status(400).json({
       error: `Invalid product SKU: "${sku}". Must be one of: ${Object.values(GOOGLE_PLAY_SKUS).join(', ')}.`,
     });
+  }
+
+  if (packageName && packageName !== 'com.aidocumenthelper.app') {
+    return res.status(400).json({ error: 'Invalid package name.' });
   }
 
   // Check for token replay on a different account
