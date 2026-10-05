@@ -27,7 +27,7 @@ import { logger } from './utils/logger';
 import { triggerHaptic } from './utils/android';
 
 export default function App() {
-  const { user, usage, isLoading, isLimitReached, updatePlan, refreshUsage, connectionError, retryConnection } = useAuth();
+  const { user, usage, isLoading, isLimitReached, updatePlan, refreshUsage, getAuthHeaders } = useAuth();
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('home');
   const [hasGeminiKey, setHasGeminiKey] = useState<boolean>(false);
@@ -52,6 +52,33 @@ export default function App() {
   const [isHelpModalOpen, setIsHelpModalOpen] = useState<boolean>(false);
   const [isPrivacyModalOpen, setIsPrivacyModalOpen] = useState<boolean>(false);
   const [isTermsModalOpen, setIsTermsModalOpen] = useState<boolean>(false);
+  const [isGuestMode, setIsGuestMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('ai_doc_guest_mode') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  const handleContinueAsGuest = () => {
+    setIsGuestMode(true);
+    try {
+      localStorage.setItem('ai_doc_guest_mode', 'true');
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    if (user) {
+      setIsGuestMode(false);
+      try {
+        localStorage.removeItem('ai_doc_guest_mode');
+      } catch {
+        // ignore
+      }
+    }
+  }, [user]);
 
   // PWA deferred install prompt
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
@@ -158,7 +185,6 @@ export default function App() {
       window.removeEventListener('androidBackButtonPressed', handleAndroidBack as any);
     };
   }, [
-    isSearchModalOpen,
     isProModalOpen,
     isAuthModalOpen,
     isProfileModalOpen,
@@ -214,82 +240,73 @@ export default function App() {
     return currentUser ? `ai_doc_user_${currentUser.id}_history` : 'ai_doc_guest_history';
   };
 
-  const readStoredHistory = (key: string): DocumentHistoryItem[] => {
+  const [history, setHistory] = useState<DocumentHistoryItem[]>(() => {
     try {
-      const raw =
-        localStorage.getItem(key) ||
-        (key === 'ai_doc_guest_history' ? localStorage.getItem('ai_doc_history') : null);
-      const parsed = raw ? JSON.parse(raw) : [];
-      // Drop the demo item older versions inserted for new users.
-      return Array.isArray(parsed)
-        ? parsed.filter((item) => item && item.id !== 'sample-hist-1')
-        : [];
+      // Check for existing history
+      const guestSaved = localStorage.getItem('ai_doc_guest_history') || localStorage.getItem('ai_doc_history');
+      if (guestSaved) return JSON.parse(guestSaved);
     } catch {
-      return [];
+      // ignore
     }
-  };
+    return [
+      {
+        id: 'sample-hist-1',
+        title: 'Rental Lease Summary',
+        type: 'pdf-summary',
+        category: 'Contracts & Legal',
+        snippet: '11-month lease for Flat 402, Green Valley Apartments. Rent: ₹26,500/mo.',
+        fullContent: SAMPLE_DOCUMENTS[0].text,
+        timestamp: Date.now() - 3600000,
+        isFavorite: true,
+      },
+    ];
+  });
 
-  // `historyOwnerKey` records which account the in-memory history belongs
-  // to, so one account's documents are never written into another
-  // account's storage when users switch on a shared device.
-  const [historyOwnerKey, setHistoryOwnerKey] = useState<string | null>(null);
-  const [history, setHistory] = useState<DocumentHistoryItem[]>([]);
-
-  // Persist history only under the account it belongs to.
+  // Keep user-specific local storage synchronized
   useEffect(() => {
-    if (!historyOwnerKey || historyOwnerKey !== getStorageKey(user)) return;
-
     try {
-      localStorage.setItem(historyOwnerKey, JSON.stringify(history));
-    } catch (err) {
-      // Storage full: cloud copies (for signed-in users) are unaffected.
-      logger.warn('Could not save document history on this device', { error: String(err) });
+      const key = getStorageKey(user);
+      localStorage.setItem(key, JSON.stringify(history));
+    } catch {
+      // ignore
     }
-  }, [history, historyOwnerKey, user?.id]);
+  }, [history, user]);
 
   // When user signs in or signs out, switch to their isolated document set
   useEffect(() => {
-    const key = getStorageKey(user);
-    const localDocs = readStoredHistory(key);
-
-    setHistory(localDocs);
-    setHistoryOwnerKey(key);
-
-    if (!user) return;
-
-    let cancelled = false;
-
-    // Upload documents that could not be saved to the cloud earlier, then
-    // load the authoritative cloud list. Only pending documents are
-    // uploaded, so documents deleted on another device do not come back.
-    // The server only adds missing documents; it never overwrites or
-    // deletes existing ones.
-    const pendingDocs = localDocs.filter((item) => item.pendingSync).slice(0, 500);
-
-    const request =
-      pendingDocs.length > 0
-        ? apiFetch('/api/documents/sync', {
-            method: 'POST',
-            body: JSON.stringify({ documents: pendingDocs }),
-          })
-        : apiFetch('/api/documents');
-
-    request
-      .then(async (res) => {
-        if (!res.ok) throw new Error(`Sync failed with status ${res.status}`);
-        return res.json();
-      })
-      .then((data) => {
-        if (!cancelled && Array.isArray(data.documents)) {
-          setHistory(data.documents);
+    if (user) {
+      // 1. Try local cache for this user
+      try {
+        const cached = localStorage.getItem(`ai_doc_user_${user.id}_history`);
+        if (cached) {
+          setHistory(JSON.parse(cached));
         }
-      })
-      .catch((err) => logger.error('Failed to sync cloud documents', err));
+      } catch {
+        // ignore
+      }
 
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+      // 2. Fetch authoritative cloud documents from backend
+      apiFetch('/api/documents')
+        .then((res) => res.json())
+        .then((data) => {
+          if (Array.isArray(data.documents) && data.documents.length > 0) {
+            setHistory(data.documents);
+          }
+        })
+        .catch((err) => logger.error('Failed to load user cloud documents', err));
+    } else {
+      // Guest session: load guest documents
+      try {
+        const guestSaved = localStorage.getItem('ai_doc_guest_history');
+        if (guestSaved) {
+          setHistory(JSON.parse(guestSaved));
+        } else {
+          setHistory([]);
+        }
+      } catch {
+        setHistory([]);
+      }
+    }
   }, [user?.id]);
 
   // Check health of Gemini backend
@@ -319,29 +336,17 @@ export default function App() {
       fullContent: content,
       timestamp: Date.now(),
       isFavorite,
-      pendingSync: Boolean(user),
     };
 
-    // Keep a generous local history. Signed-in users also keep every
-    // document in the cloud.
-    setHistory((prev) => [newItem, ...prev.slice(0, 199)]);
+    setHistory((prev) => [newItem, ...prev.slice(0, 29)]);
 
-    // If logged in, persist to backend database. On failure the document
-    // stays on this device and is uploaded by the next sync.
+    // If logged in, persist to backend database
     if (user) {
       try {
-        const res = await apiFetch('/api/documents', {
+        await apiFetch('/api/documents', {
           method: 'POST',
           body: JSON.stringify(newItem),
         });
-
-        if (res.ok) {
-          setHistory((prev) =>
-            prev.map((item) => (item.id === newItem.id ? { ...item, pendingSync: false } : item))
-          );
-        } else {
-          logger.warn('Cloud save failed; document kept on this device', { status: res.status });
-        }
       } catch (err) {
         logger.error('Failed to save document to cloud', err);
       }
@@ -351,15 +356,15 @@ export default function App() {
   };
 
   const handleToggleFavorite = async (id: string) => {
-    const current = history.find((item) => item.id === id);
-    if (!current) return;
-
-    // Compute the new value before updating state; React may run state
-    // updaters later, so it must not be read from inside one.
-    const updatedFav = !current.isFavorite;
-
+    let updatedFav = false;
     setHistory((prev) =>
-      prev.map((item) => (item.id === id ? { ...item, isFavorite: updatedFav } : item))
+      prev.map((item) => {
+        if (item.id === id) {
+          updatedFav = !item.isFavorite;
+          return { ...item, isFavorite: updatedFav };
+        }
+        return item;
+      })
     );
 
     if (user) {
@@ -495,31 +500,8 @@ export default function App() {
   }
 
   // 2. Fresh launch when user is not authenticated: Show AI Document Helper's own Login Screen
-  // Saved session exists but the server is unreachable: offer a retry
-  // instead of signing the user out.
-  if (!user && connectionError) {
-    return (
-      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-6 text-center">
-        <div className="w-12 h-12 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 mb-4">
-          <span className="font-bold text-lg">!</span>
-        </div>
-        <h1 className="text-base font-semibold mb-1">Can't reach the server</h1>
-        <p className="text-sm text-slate-400 max-w-xs mb-5">
-          Please check your internet connection. You are still signed in.
-        </p>
-        <button
-          type="button"
-          onClick={retryConnection}
-          className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold rounded-xl"
-        >
-          Try again
-        </button>
-      </div>
-    );
-  }
-
-  if (!user) {
-    return <LoginScreen />;
+  if (!user && !isGuestMode) {
+    return <LoginScreen onContinueAsGuest={handleContinueAsGuest} />;
   }
 
   return (

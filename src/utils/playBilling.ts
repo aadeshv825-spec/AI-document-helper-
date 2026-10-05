@@ -1,13 +1,12 @@
 import { logger } from './logger';
-import { apiFetch } from './apiClient';
+import { buildApiUrl } from './apiClient';
 
 export const PLAY_STORE_SKUS = {
   MONTHLY: 'ai_doc_pro_monthly',
   ANNUAL: 'ai_doc_pro_annual',
 } as const;
 
-export type PlayStoreSku =
-  typeof PLAY_STORE_SKUS[keyof typeof PLAY_STORE_SKUS];
+export type PlayStoreSku = typeof PLAY_STORE_SKUS[keyof typeof PLAY_STORE_SKUS];
 
 export interface PlayBillingProduct {
   sku: PlayStoreSku;
@@ -21,16 +20,14 @@ export const PLAY_STORE_PRODUCTS: PlayBillingProduct[] = [
   {
     sku: PLAY_STORE_SKUS.MONTHLY,
     title: 'Document Helper Pro - Monthly',
-    description:
-      'Unlimited AI processing, high-accuracy OCR, Hindi translation & PDF tools',
+    description: 'Unlimited AI processing, high-accuracy OCR, Hindi translation & PDF tools',
     price: '₹99',
     period: 'monthly',
   },
   {
     sku: PLAY_STORE_SKUS.ANNUAL,
     title: 'Document Helper Pro - Annual',
-    description:
-      'Unlimited AI processing, high-accuracy OCR, Hindi translation & PDF tools (Save 41%)',
+    description: 'Unlimited AI processing, high-accuracy OCR, Hindi translation & PDF tools (Save 41%)',
     price: '₹699',
     period: 'annual',
   },
@@ -40,61 +37,23 @@ declare global {
   interface Window {
     AndroidPlayBilling?: {
       isAvailable?: () => boolean;
-      launchBillingFlow?: (
-        sku: string,
-        accountId?: string
-      ) => void | Promise<any>;
+      launchBillingFlow?: (sku: string, accountId?: string) => void | Promise<any>;
       queryPurchases?: () => string | Promise<string>;
-      getProductPrices?: () => string;
     };
-
     AndroidBridge?: {
       isAndroid?: () => boolean;
       getAppVersion?: () => string;
+      getApiBaseUrl?: () => string;
       vibrate?: (durationMs: number) => void;
       showToast?: (message: string) => void;
       shareText?: (title: string, text: string) => void;
       copyToClipboard?: (text: string) => void;
     };
-
     isPlayStoreApp?: boolean;
-
-    getDigitalGoodsService?: (
-      serviceProvider: string
-    ) => Promise<any>;
-
-    onGooglePlayPurchaseCompleted?: (
-      purchaseData: any
-    ) => void;
-
-    onGooglePlayPurchaseError?: (
-      message: string
-    ) => void;
-  }
-}
-
-/**
- * Returns the localized prices configured in Google Play, keyed by
- * product ID, when the native billing bridge provides them.
- */
-export function getPlayProductPrices(): Partial<Record<PlayStoreSku, string>> {
-  try {
-    const raw = window.AndroidPlayBilling?.getProductPrices?.();
-
-    if (typeof raw !== 'string' || !raw) return {};
-
-    const parsed = JSON.parse(raw);
-    const result: Partial<Record<PlayStoreSku, string>> = {};
-
-    for (const sku of Object.values(PLAY_STORE_SKUS)) {
-      if (typeof parsed?.[sku] === 'string' && parsed[sku]) {
-        result[sku] = parsed[sku];
-      }
-    }
-
-    return result;
-  } catch {
-    return {};
+    getDigitalGoodsService?: (serviceProvider: string) => Promise<any>;
+    onGooglePlayPurchaseCompleted?: (purchaseData: any) => void;
+    onGooglePlayPurchaseError?: (errorMessage: string | any) => void;
+    onGooglePlayPurchasesRestored?: (purchases: any[]) => void;
   }
 }
 
@@ -106,29 +65,19 @@ export function isAndroidPlayStoreEnvironment(): boolean {
   if (typeof window === 'undefined') return false;
 
   // 1. Check for native Android JavaScript interface
-  if (
-    window.AndroidPlayBilling ||
-    window.AndroidBridge ||
-    window.isPlayStoreApp
-  ) {
+  if (window.AndroidPlayBilling || window.AndroidBridge || window.isPlayStoreApp) {
     return true;
   }
 
   // 2. Check for Play Store TWA query or user agent markers
   const urlParams = new URLSearchParams(window.location.search);
-
-  if (
-    urlParams.get('utm_source') === 'playstore' ||
-    urlParams.get('twa') === '1'
-  ) {
+  if (urlParams.get('utm_source') === 'playstore' || urlParams.get('twa') === '1') {
     return true;
   }
 
   // 3. Check for standalone Android PWA/TWA
   const isAndroid = /android/i.test(navigator.userAgent);
-  const isStandalone = window.matchMedia(
-    '(display-mode: standalone)'
-  ).matches;
+  const isStandalone = window.matchMedia('(display-mode: standalone)').matches;
 
   return isAndroid && isStandalone;
 }
@@ -137,20 +86,14 @@ export function isAndroidPlayStoreEnvironment(): boolean {
  * Checks if the W3C Digital Goods API for Google Play Billing is available (TWA).
  */
 export function isDigitalGoodsSupported(): boolean {
-  return (
-    typeof window !== 'undefined' &&
-    typeof window.getDigitalGoodsService === 'function'
-  );
+  return typeof window !== 'undefined' && typeof window.getDigitalGoodsService === 'function';
 }
 
 /**
  * Checks if the native AndroidPlayBilling JavaScript interface is available.
  */
 export function isNativePlayBillingSupported(): boolean {
-  return (
-    typeof window !== 'undefined' &&
-    Boolean(window.AndroidPlayBilling)
-  );
+  return typeof window !== 'undefined' && Boolean(window.AndroidPlayBilling);
 }
 
 export interface PurchaseVerificationResponse {
@@ -175,61 +118,44 @@ export async function verifyAndActivatePlayPurchase(
   authHeaders: Record<string, string>
 ): Promise<PurchaseVerificationResponse> {
   try {
-    const res = await apiFetch(
-      '/api/billing/google-play/verify-purchase',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders,
-        },
-        body: JSON.stringify({
-          purchaseToken: params.purchaseToken,
-          sku: params.sku,
-          orderId: params.orderId,
-          packageName:
-            params.packageName || 'com.aidocumenthelper.app',
-        }),
-      }
-    );
+    const res = await fetch(buildApiUrl('/api/billing/google-play/verify-purchase'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders,
+      },
+      body: JSON.stringify({
+        purchaseToken: params.purchaseToken,
+        sku: params.sku,
+        orderId: params.orderId,
+        packageName: params.packageName || 'com.aidocumenthelper.app',
+      }),
+    });
 
     const data = await res.json();
-
     if (!res.ok) {
       return {
         success: false,
-        error:
-          data.error ||
-          'Failed to verify Google Play purchase.',
+        error: data.error || 'Failed to verify Google Play purchase.',
       };
     }
 
-    logger.info(
-      'Google Play Pro subscription successfully activated',
-      {
-        sku: params.sku,
-        orderId: params.orderId,
-      }
-    );
+    logger.info('Google Play Pro subscription successfully activated', {
+      sku: params.sku,
+      orderId: params.orderId,
+    });
 
     return {
       success: true,
-      message:
-        data.message ||
-        'Pro membership activated successfully!',
+      message: data.message || 'Pro membership activated successfully!',
       user: data.user,
       usage: data.usage,
     };
   } catch (err: any) {
-    logger.error(
-      'Error verifying Google Play purchase with backend',
-      err
-    );
-
+    logger.error('Error verifying Google Play purchase with backend', err);
     return {
       success: false,
-      error:
-        'Network connection error while verifying Google Play purchase.',
+      error: 'Network connection error while verifying Google Play purchase.',
     };
   }
 }
@@ -240,68 +166,81 @@ export async function verifyAndActivatePlayPurchase(
 export async function restorePlayPurchases(
   authHeaders: Record<string, string>,
   purchaseTokens?: string[]
-): Promise<{
-  success: boolean;
-  restored: boolean;
-  message: string;
-  user?: any;
-  usage?: any;
-}> {
+): Promise<{ success: boolean; restored: boolean; message: string; user?: any; usage?: any }> {
   try {
-    // If native bridge can provide existing purchase tokens, query them
+    // If native bridge can provide existing purchase tokens, query them with async listener synchronization
     let deviceTokens = purchaseTokens || [];
+    let devicePurchases: any[] = [];
 
-    if (
-      deviceTokens.length === 0 &&
-      window.AndroidPlayBilling?.queryPurchases
-    ) {
+    if (deviceTokens.length === 0 && window.AndroidPlayBilling?.queryPurchases) {
       try {
-        const raw =
-          await window.AndroidPlayBilling.queryPurchases();
+        const queryPromise = new Promise<any[]>((resolve) => {
+          let timeoutId: any = null;
 
-        if (typeof raw === 'string') {
-          const parsed = JSON.parse(raw);
+          const onRestored = (event: any) => {
+            clearTimeout(timeoutId);
+            cleanup();
+            const list = event.detail || event;
+            resolve(Array.isArray(list) ? list : []);
+          };
 
-          if (Array.isArray(parsed)) {
-            deviceTokens = parsed
-              .map(
-                (p) =>
-                  p.purchaseToken || p.token
-              )
-              .filter(Boolean);
+          const cleanup = () => {
+            window.removeEventListener('onGooglePlayPurchasesRestored', onRestored);
+            delete window.onGooglePlayPurchasesRestored;
+          };
+
+          window.addEventListener('onGooglePlayPurchasesRestored', onRestored);
+          window.onGooglePlayPurchasesRestored = (data: any) => onRestored({ detail: data });
+
+          // Fallback timeout in case no purchases or already cached
+          timeoutId = setTimeout(() => {
+            cleanup();
+            resolve([]);
+          }, 2500);
+
+          try {
+            const raw = window.AndroidPlayBilling!.queryPurchases();
+            if (raw && typeof raw === 'string') {
+              const parsed = JSON.parse(raw);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                clearTimeout(timeoutId);
+                cleanup();
+                resolve(parsed);
+              }
+            }
+          } catch {
+            // let timer handle
           }
+        });
+
+        const queried = await queryPromise;
+        if (Array.isArray(queried) && queried.length > 0) {
+          devicePurchases = queried;
+          deviceTokens = queried.map((p) => p.purchaseToken || p.token).filter(Boolean);
         }
       } catch (e) {
-        logger.warn(
-          'Could not query local AndroidPlayBilling purchases',
-          e
-        );
+        logger.warn('Could not query local AndroidPlayBilling purchases', e);
       }
     }
 
-    const res = await apiFetch(
-      '/api/billing/google-play/restore-purchases',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders,
-        },
-        body: JSON.stringify({
-          purchaseTokens: deviceTokens,
-        }),
-      }
-    );
+    const res = await fetch(buildApiUrl('/api/billing/google-play/restore-purchases'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders,
+      },
+      body: JSON.stringify({
+        purchaseTokens: deviceTokens,
+        purchases: devicePurchases,
+      }),
+    });
 
     const data = await res.json();
-
     if (!res.ok) {
       return {
         success: false,
         restored: false,
-        message:
-          data.error ||
-          'Failed to restore purchases.',
+        message: data.error || 'Failed to restore purchases.',
       };
     }
 
@@ -313,16 +252,11 @@ export async function restorePlayPurchases(
       usage: data.usage,
     };
   } catch (err: any) {
-    logger.error(
-      'Error restoring Google Play purchases',
-      err
-    );
-
+    logger.error('Error restoring Google Play purchases', err);
     return {
       success: false,
       restored: false,
-      message:
-        'Network error while attempting to restore Google Play purchases.',
+      message: 'Network error while attempting to restore Google Play purchases.',
     };
   }
 }
@@ -336,92 +270,53 @@ export async function initiatePlayPurchase(
   sku: PlayStoreSku,
   userId: string | undefined,
   authHeaders: Record<string, string>,
-  onSuccess: (
-    result: PurchaseVerificationResponse
-  ) => void,
+  onSuccess: (result: PurchaseVerificationResponse) => void,
   onError: (errorMsg: string) => void
 ): Promise<void> {
   // 1. Android Native WebView / Capacitor Bridge Flow
   if (window.AndroidPlayBilling?.launchBillingFlow) {
     try {
-      // Set up completion and error listeners. The native layer reports
-      // cancellations, pending payments and billing errors through
-      // onGooglePlayPurchaseError, so the UI never stays stuck.
-      window.onGooglePlayPurchaseError = (message: string) => {
-        onError(
-          typeof message === 'string' && message
-            ? message
-            : 'Google Play purchase failed.'
-        );
+      const cleanup = () => {
+        delete window.onGooglePlayPurchaseCompleted;
+        delete window.onGooglePlayPurchaseError;
       };
 
-      window.onGooglePlayPurchaseCompleted =
-        async (purchaseData: any) => {
-          try {
-            const token =
-              typeof purchaseData === 'string'
-                ? purchaseData
-                : purchaseData?.purchaseToken ||
-                  purchaseData?.token;
-
-            if (!token) {
-              onError('Google Play did not return a purchase token.');
-              return;
-            }
-
-            const orderId =
-              purchaseData?.orderId || undefined;
-
-            // Prefer the product Google Play actually reported.
-            const purchasedSku =
-              typeof purchaseData?.sku === 'string' &&
-              Object.values(PLAY_STORE_SKUS).includes(purchaseData.sku)
-                ? purchaseData.sku
-                : sku;
-
-            const res =
-              await verifyAndActivatePlayPurchase(
-                {
-                  purchaseToken: token,
-                  sku: purchasedSku,
-                  orderId,
-                },
-                authHeaders
-              );
-
-            if (res.success) {
-              onSuccess(res);
-            } else {
-              onError(
-                res.error ||
-                  'Verification failed'
-              );
-            }
-          } catch (e: any) {
-            onError(
-              e.message ||
-                'Purchase completion error'
-            );
+      // Set up completion listener
+      window.onGooglePlayPurchaseCompleted = async (purchaseData: any) => {
+        cleanup();
+        try {
+          const token = typeof purchaseData === 'string' ? purchaseData : purchaseData?.purchaseToken || purchaseData?.token;
+          const orderId = purchaseData?.orderId;
+          const res = await verifyAndActivatePlayPurchase(
+            {
+              purchaseToken: token,
+              sku,
+              orderId,
+            },
+            authHeaders
+          );
+          if (res.success) {
+            onSuccess(res);
+          } else {
+            onError(res.error || 'Verification failed');
           }
-        };
+        } catch (e: any) {
+          onError(e.message || 'Purchase completion error');
+        }
+      };
 
-      await window.AndroidPlayBilling.launchBillingFlow(
-        sku,
-        userId
-      );
+      // Set up error / cancellation listener
+      window.onGooglePlayPurchaseError = (errorMessage: any) => {
+        cleanup();
+        const errText = typeof errorMessage === 'string' ? errorMessage : errorMessage?.error || 'Google Play purchase was cancelled or failed.';
+        onError(errText);
+      };
 
+      await window.AndroidPlayBilling.launchBillingFlow(sku, userId);
       return;
     } catch (err: any) {
-      logger.error(
-        'Error invoking AndroidPlayBilling bridge',
-        err
-      );
-
-      onError(
-        err.message ||
-          'Could not launch Google Play billing.'
-      );
-
+      logger.error('Error invoking AndroidPlayBilling bridge', err);
+      onError(err.message || 'Could not launch Google Play billing.');
       return;
     }
   }
@@ -429,83 +324,48 @@ export async function initiatePlayPurchase(
   // 2. W3C Digital Goods API (TWA in Chrome / Google Play)
   if (isDigitalGoodsSupported()) {
     try {
-      const digitalGoodsService =
-        await window.getDigitalGoodsService!(
-          'https://play.google.com/billing'
-        );
-
+      const digitalGoodsService = await window.getDigitalGoodsService!('https://play.google.com/billing');
       if (digitalGoodsService) {
         const paymentDetails = {
           total: {
             label: 'Total',
-            amount: {
-              currency: 'INR',
-              value:
-                sku === PLAY_STORE_SKUS.ANNUAL
-                  ? '699.00'
-                  : '99.00',
-            },
+            amount: { currency: 'INR', value: sku === PLAY_STORE_SKUS.ANNUAL ? '699.00' : '99.00' },
           },
         };
 
         const paymentMethods = [
           {
-            supportedMethods:
-              'https://play.google.com/billing',
+            supportedMethods: 'https://play.google.com/billing',
             data: { sku },
           },
         ];
 
-        const request = new PaymentRequest(
-          paymentMethods,
-          paymentDetails
-        );
-
-        const paymentResponse =
-          await request.show();
-
-        const purchaseToken =
-          paymentResponse.details?.purchaseToken;
+        const request = new PaymentRequest(paymentMethods, paymentDetails);
+        const paymentResponse = await request.show();
+        const purchaseToken = paymentResponse.details?.purchaseToken;
 
         if (purchaseToken) {
-          const verification =
-            await verifyAndActivatePlayPurchase(
-              {
-                purchaseToken,
-                sku,
-              },
-              authHeaders
-            );
-
-          await paymentResponse.complete(
-            verification.success
-              ? 'success'
-              : 'fail'
+          const verification = await verifyAndActivatePlayPurchase(
+            {
+              purchaseToken,
+              sku,
+            },
+            authHeaders
           );
+
+          await paymentResponse.complete(verification.success ? 'success' : 'fail');
 
           if (verification.success) {
             onSuccess(verification);
           } else {
-            onError(
-              verification.error ||
-                'Purchase verification failed.'
-            );
+            onError(verification.error || 'Purchase verification failed.');
           }
-
           return;
         }
       }
     } catch (err: any) {
-      logger.error(
-        'Digital goods purchase error',
-        err
-      );
-
-      onError(
-        err.message ||
-          'Google Play purchase cancelled or failed.'
-      );
-
+      logger.error('Digital goods purchase error', err);
+      onError(err.message || 'Google Play purchase cancelled or failed.');
       return;
     }
   }

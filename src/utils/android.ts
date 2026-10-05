@@ -7,6 +7,7 @@ declare global {
     AndroidBridge?: {
       isAndroid?: () => boolean;
       getAppVersion?: () => string;
+      getApiBaseUrl?: () => string;
       vibrate?: (durationMs: number) => void;
       showToast?: (message: string) => void;
       shareText?: (title: string, text: string) => void;

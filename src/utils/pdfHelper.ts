@@ -1,5 +1,4 @@
 import { PDFDocument } from 'pdf-lib';
-import { saveBlobToDevice } from './download';
 
 /**
  * Merges multiple PDF byte arrays into a single unified PDF document.
@@ -54,39 +53,67 @@ export async function getPdfPageCount(pdfBuffer: Uint8Array): Promise<number> {
 }
 
 /**
- * Returns the data URL unchanged for JPEG/PNG images, otherwise redraws
- * the image (e.g. WebP, GIF, BMP) on a canvas and returns a JPEG.
+ * Converts an image dataUrl (including WebP, BMP, etc.) into true JPEG or PNG bytes for pdf-lib.
  */
-async function ensureJpegOrPngDataUrl(dataUrl: string): Promise<string> {
-  if (/^data:image\/(jpeg|jpg|png);/i.test(dataUrl)) {
-    return dataUrl;
+async function ensureJpegOrPngBytes(dataUrl: string): Promise<{ isPng: boolean; bytes: Uint8Array }> {
+  if (dataUrl.startsWith('data:image/png')) {
+    const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
+    const binaryStr = atob(base64Data);
+    const len = binaryStr.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binaryStr.charCodeAt(i);
+    }
+    return { isPng: true, bytes };
   }
 
-  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+  // If already strict JPEG with SOI header
+  if (dataUrl.startsWith('data:image/jpeg') || dataUrl.startsWith('data:image/jpg')) {
+    const base64Data = dataUrl.replace(/^data:image\/jpe?g;base64,/, '');
+    const binaryStr = atob(base64Data);
+    const len = binaryStr.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binaryStr.charCodeAt(i);
+    }
+    if (bytes.length > 2 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+      return { isPng: false, bytes };
+    }
+  }
+
+  // Convert WebP / other formats cleanly via canvas to standard JPEG
+  return new Promise((resolve, reject) => {
     const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () =>
-      reject(new Error('This image format is not supported. Please use JPG or PNG images.'));
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth || img.width;
+        canvas.height = img.naturalHeight || img.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          throw new Error('Canvas context unavailable');
+        }
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0);
+
+        const jpegUrl = canvas.toDataURL('image/jpeg', 0.92);
+        const base64 = jpegUrl.replace(/^data:image\/jpeg;base64,/, '');
+        const binary = atob(base64);
+        const len = binary.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        resolve({ isPng: false, bytes });
+      } catch (e) {
+        reject(e);
+      }
+    };
+    img.onerror = () => reject(new Error('Failed to load image for PDF conversion'));
     img.src = dataUrl;
   });
-
-  const canvas = document.createElement('canvas');
-  canvas.width = image.naturalWidth || image.width;
-  canvas.height = image.naturalHeight || image.height;
-
-  const context = canvas.getContext('2d');
-  if (!context || !canvas.width || !canvas.height) {
-    throw new Error('This image could not be converted. Please use JPG or PNG images.');
-  }
-
-  context.fillStyle = '#ffffff';
-  context.fillRect(0, 0, canvas.width, canvas.height);
-  context.drawImage(image, 0, 0);
-
-  const jpeg = canvas.toDataURL('image/jpeg', 0.92);
-  canvas.width = 0;
-  canvas.height = 0;
-  return jpeg;
 }
 
 /**
@@ -107,23 +134,9 @@ export async function imagesToPdf(
   const pdfDoc = await PDFDocument.create();
 
   for (const imgItem of images) {
-    // pdf-lib only embeds JPEG and PNG; convert other formats first.
-    const dataUrl = await ensureJpegOrPngDataUrl(imgItem.dataUrl);
-    let embeddedImg;
-
-    if (dataUrl.startsWith('data:image/png')) {
-      embeddedImg = await pdfDoc.embedPng(dataUrl);
-    } else {
-      // JPEG or WebP converted to JPEG
-      const base64Data = dataUrl.replace(/^data:image\/[a-z]+;base64,/, '');
-      const binaryStr = atob(base64Data);
-      const len = binaryStr.length;
-      const bytes = new Uint8Array(len);
-      for (let i = 0; i < len; i++) {
-        bytes[i] = binaryStr.charCodeAt(i);
-      }
-      embeddedImg = await pdfDoc.embedJpg(bytes);
-    }
+    const dataUrl = imgItem.dataUrl;
+    const { isPng, bytes } = await ensureJpegOrPngBytes(dataUrl);
+    const embeddedImg = isPng ? await pdfDoc.embedPng(bytes) : await pdfDoc.embedJpg(bytes);
 
     const imgWidth = embeddedImg.width;
     const imgHeight = embeddedImg.height;
@@ -177,6 +190,12 @@ export async function cleanImageToPdf(
  */
 export function downloadBlobFile(bytes: Uint8Array, fileName: string, mimeType: string = 'application/pdf') {
   const blob = new Blob([bytes], { type: mimeType });
-  // Works in browsers and in the Android app (native save).
-  return saveBlobToDevice(blob, fileName);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

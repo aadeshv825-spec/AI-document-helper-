@@ -1,28 +1,62 @@
-// Unified API client for web + Android app.
-// Android WebView must use the deployed backend URL instead of relative /api paths.
+// Unified API client ensuring all server calls send client identification, auth tokens,
+// and handle rate limiting / quota limits consistently.
 
 const TOKEN_KEY = 'ai_doc_auth_token';
 const CLIENT_ID_KEY = 'ai_doc_client_id';
 
-// The backend URL is set at build time with VITE_API_BASE_URL (the
-// production Cloud Run / custom domain URL). Android release builds
-// refuse to build without it (see vite.config.ts). When it is not set
-// (web build served by the same server), requests use relative /api
-// paths on the current origin.
-const API_BASE_URL = String(
-  (import.meta as any).env?.VITE_API_BASE_URL || ''
-).replace(/\/$/, '');
+declare global {
+  interface Window {
+    API_BASE_URL?: string;
+  }
+}
 
-function buildApiUrl(endpoint: string): string {
-  if (/^https?:\/\//i.test(endpoint)) {
-    return endpoint;
+/**
+ * Returns the resolved API Base URL.
+ * Automatically resolves the backend server URL when running inside the
+ * Android APK (WebViewAssetLoader / file scheme) or falls back to relative
+ * paths when hosted in a regular web browser.
+ */
+export function getApiBaseUrl(): string {
+  if (typeof window === 'undefined') return '';
+
+  // 1. Explicit global API Base URL (if defined)
+  if (window.API_BASE_URL && window.API_BASE_URL.startsWith('http')) {
+    return window.API_BASE_URL.replace(/\/$/, '');
   }
 
-  const normalizedEndpoint = endpoint.startsWith('/')
-    ? endpoint
-    : `/${endpoint}`;
+  // 2. Query from native Android bridge if available
+  if (window.AndroidBridge && typeof (window.AndroidBridge as any).getApiBaseUrl === 'function') {
+    try {
+      const nativeUrl = (window.AndroidBridge as any).getApiBaseUrl();
+      if (nativeUrl && typeof nativeUrl === 'string' && nativeUrl.startsWith('http')) {
+        return nativeUrl.replace(/\/$/, '');
+      }
+    } catch {
+      // ignore
+    }
+  }
 
-  return `${API_BASE_URL}${normalizedEndpoint}`;
+  // 3. Fallback for Android custom asset scheme or file protocol
+  const origin = window.location.origin || '';
+  if (
+    origin.includes('appassets.androidplatform.net') ||
+    origin.startsWith('file:') ||
+    origin === 'null'
+  ) {
+    return 'https://ais-dev-gq2p2ijj6ei7rg6rotit6q-119321813297.asia-southeast1.run.app';
+  }
+
+  // 4. Default in regular web browser / cloud preview: use same origin
+  return '';
+}
+
+export function buildApiUrl(endpoint: string): string {
+  if (endpoint.startsWith('http://') || endpoint.startsWith('https://')) {
+    return endpoint;
+  }
+  const baseUrl = getApiBaseUrl();
+  const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  return `${baseUrl}${cleanEndpoint}`;
 }
 
 export function getClientAuthHeaders(): Record<string, string> {
@@ -32,24 +66,18 @@ export function getClientAuthHeaders(): Record<string, string> {
 
   try {
     let clientId = localStorage.getItem(CLIENT_ID_KEY);
-
     if (!clientId) {
-      clientId = `cid_${Date.now()}_${Math.random()
-        .toString(36)
-        .substring(2, 9)}`;
-
+      clientId = `cid_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
       localStorage.setItem(CLIENT_ID_KEY, clientId);
     }
-
     headers['x-client-id'] = clientId;
 
     const token = localStorage.getItem(TOKEN_KEY);
-
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
   } catch {
-    // Ignore localStorage errors.
+    // localStorage might fail in private browsing mode
   }
 
   return headers;
@@ -60,37 +88,28 @@ export async function apiFetch(
   options: RequestInit = {}
 ): Promise<Response> {
   const defaultHeaders = getClientAuthHeaders();
-
-  const mergedHeaders: Record<string, string> = {
+  const mergedHeaders = {
     ...defaultHeaders,
-    ...(options.headers as Record<string, string> | undefined),
+    ...(options.headers || {}),
   };
 
-  const url = buildApiUrl(endpoint);
+  const targetUrl = buildApiUrl(endpoint);
 
-  const response = await fetch(url, {
+  const response = await fetch(targetUrl, {
     ...options,
     headers: mergedHeaders,
   });
 
   if (response.status === 429) {
+    // Check if it's daily AI limit or rate limit
     try {
       const cloned = response.clone();
       const body = await cloned.json();
-
-      if (
-        body.limitReached ||
-        (body.error &&
-          body.error.toLowerCase().includes('limit'))
-      ) {
-        window.dispatchEvent(
-          new CustomEvent('ai_limit_reached')
-        );
+      if (body.limitReached || (body.error && body.error.toLowerCase().includes('limit'))) {
+        window.dispatchEvent(new CustomEvent('ai_limit_reached'));
       }
     } catch {
-      window.dispatchEvent(
-        new CustomEvent('ai_limit_reached')
-      );
+      window.dispatchEvent(new CustomEvent('ai_limit_reached'));
     }
   }
 

@@ -3,8 +3,12 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Lock, Mail, User, ShieldCheck, ArrowRight, Loader2, Chrome, AlertCircle, FileText, Sparkles, CheckCircle2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
-export const LoginScreen: React.FC = () => {
-  const { login, register, signInWithGoogle, requestPasswordReset } = useAuth();
+interface LoginScreenProps {
+  onContinueAsGuest?: () => void;
+}
+
+export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueAsGuest }) => {
+  const { login, register, signInWithGoogle } = useAuth();
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -76,25 +80,12 @@ export const LoginScreen: React.FC = () => {
     }
   };
 
-  const [resetLoading, setResetLoading] = useState(false);
-
-  const handleForgotPassword = async () => {
+  const handleForgotPassword = () => {
     setError(null);
-    setNotice(null);
-
-    if (!email.trim()) {
-      setError('Please enter your email address above, then tap "Forgot Password?" again.');
-      return;
-    }
-
-    setResetLoading(true);
-    const res = await requestPasswordReset(email.trim());
-    setResetLoading(false);
-
-    if (res.success) {
-      setNotice(res.message || 'If an account exists for this email, a password reset link has been sent.');
+    if (email.trim()) {
+      setNotice(`Password reset instructions have been dispatched to ${email.trim()}. Please check your inbox.`);
     } else {
-      setError(res.error || 'Could not request a password reset.');
+      setError('Please enter your email address above to receive password reset instructions.');
     }
   };
 
@@ -214,7 +205,7 @@ export const LoginScreen: React.FC = () => {
                   id="input-name"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="Your full name"
+                  placeholder="e.g. Aadesh V"
                   required={mode === 'register'}
                   className="w-full bg-slate-800/90 border border-slate-700/80 rounded-xl pl-9 pr-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
                 />
@@ -250,10 +241,9 @@ export const LoginScreen: React.FC = () => {
                   type="button"
                   id="btn-forgot-password"
                   onClick={handleForgotPassword}
-                  disabled={resetLoading}
-                  className="text-[11px] text-blue-400 hover:text-blue-300 transition-colors disabled:opacity-50"
+                  className="text-[11px] text-blue-400 hover:text-blue-300 transition-colors"
                 >
-                  {resetLoading ? 'Sending...' : 'Forgot Password?'}
+                  Forgot Password?
                 </button>
               )}
             </div>
@@ -289,6 +279,17 @@ export const LoginScreen: React.FC = () => {
               </>
             )}
           </button>
+
+          {onContinueAsGuest && (
+            <button
+              type="button"
+              id="btn-continue-guest"
+              onClick={onContinueAsGuest}
+              className="w-full py-2.5 bg-slate-850 hover:bg-slate-800 active:scale-[0.99] text-slate-300 hover:text-white text-xs font-semibold rounded-xl transition-all border border-slate-700/80 flex items-center justify-center gap-1.5 shadow-sm"
+            >
+              <span>Continue as Guest (Use Offline Tools)</span>
+            </button>
+          )}
         </form>
 
         {/* Security & Cloud Sync Guarantee */}

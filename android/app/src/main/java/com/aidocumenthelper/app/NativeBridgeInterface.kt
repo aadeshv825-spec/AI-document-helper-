@@ -40,6 +40,15 @@ class NativeBridgeInterface(private val context: Context) {
     }
 
     @JavascriptInterface
+    fun getApiBaseUrl(): String {
+        return try {
+            context.getString(R.string.production_web_url)
+        } catch (_: Exception) {
+            "https://ais-dev-gq2p2ijj6ei7rg6rotit6q-119321813297.asia-southeast1.run.app"
+        }
+    }
+
+    @JavascriptInterface
     fun vibrate(durationMs: Long) {
         try {
             val validDuration = if (durationMs in 1..2000) durationMs else 50

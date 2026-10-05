@@ -1,4 +1,3 @@
-
 node_modules/
 build/
 dist/
@@ -7,45 +6,17 @@ coverage/
 *.log
 .env*
 !.env.example
-data/*.json
 
-# Android local configuration
-local.properties
-**/local.properties
-
-# Signing keys
-*.jks
-*.keystore
-*.p12
-*.pfx
-
-# Gradle cache
-.gradle/
-**/.gradle/
-
-# Signing material, certificates and service-account keys
-*.pem
-*.key
-*.der
-*service-account*.json
-*-credentials.json
-upload_certificate*
-
-# Android build outputs and IDE files
-*.aab
-*.apk
-android/app/build/
-android/build/
-android/.idea/
-*.iml
-
-# Generated archives (must never be committed; may contain secrets)
-android-project.zip
-android-project.tar.gz
-
-# Local data and backups
+# Local databases and runtime data
 data/
-*.corrupt-*
 
-# Generated Android web assets (built by scripts/prepare-android-assets.mjs)
-android/app/src/main/assets/public/
+# Signing keystores & credentials (protect production keys from Git)
+*.keystore
+*.jks
+
+# Android & Gradle artifacts
+.gradle/
+local.properties
+android/.gradle/
+android/build/
+android/app/build/

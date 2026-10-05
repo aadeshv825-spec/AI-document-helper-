@@ -1,10 +1,14 @@
 import * as pdfjsLib from 'pdfjs-dist';
-// Bundle the PDF.js worker with the app so PDF tools also work offline
-// and inside the Android app (no dependency on an external CDN).
-import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
+// Configure the worker to use CDN with robust fallback for browser and mobile environments
 if (typeof window !== 'undefined') {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+  try {
+    const version = pdfjsLib.version || '4.0.379';
+    // unpkg provides the exact npm version matching package.json
+    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${version}/build/pdf.worker.min.mjs`;
+  } catch {
+    // Ignore worker setup failure
+  }
 }
 
 export interface RenderedPdfPage {
@@ -20,70 +24,45 @@ export interface RenderedPdfPage {
 export async function renderPdfToImages(
   pdfBuffer: Uint8Array,
   scale: number = 1.5,
-  maxPages: number = 20,
-  onTotalPages?: (totalPages: number) => void
+  maxPages: number = 20
 ): Promise<RenderedPdfPage[]> {
-  // PDF.js transfers the buffer to its worker, which would empty the
-  // caller's copy; pass a copy so the original file can be reused.
   const loadingTask = pdfjsLib.getDocument({
-    data: pdfBuffer.slice(),
+    data: pdfBuffer,
     cMapUrl: `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/cmaps/`,
     cMapPacked: true,
   });
 
   const pdf = await loadingTask.promise;
+  const numPages = Math.min(pdf.numPages, maxPages);
+  const pages: RenderedPdfPage[] = [];
 
-  try {
-    onTotalPages?.(pdf.numPages);
+  for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const viewport = page.getViewport({ scale });
 
-    const numPages = Math.min(pdf.numPages, maxPages);
-    const pages: RenderedPdfPage[] = [];
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    if (!context) continue;
 
-    for (let pageNum = 1; pageNum <= numPages; pageNum++) {
-      const page = await pdf.getPage(pageNum);
-      const viewport = page.getViewport({ scale });
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
 
-      const canvas = document.createElement('canvas');
-      const context = canvas.getContext('2d');
-      if (!context) {
-        throw new Error('Your device could not prepare the page image.');
-      }
+    const renderContext = {
+      canvas: canvas,
+      canvasContext: context,
+      viewport: viewport,
+    };
 
-      canvas.width = Math.floor(viewport.width);
-      canvas.height = Math.floor(viewport.height);
+    await (page.render(renderContext as any) as any).promise;
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
 
-      // White background so transparent pages are not rendered black in JPEG.
-      context.fillStyle = '#ffffff';
-      context.fillRect(0, 0, canvas.width, canvas.height);
-
-      const renderContext = {
-        canvas: canvas,
-        canvasContext: context,
-        viewport: viewport,
-      };
-
-      await (page.render(renderContext as any) as any).promise;
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
-
-      pages.push({
-        pageNumber: pageNum,
-        dataUrl,
-        width: viewport.width,
-        height: viewport.height,
-      });
-
-      // Release memory used by the page and canvas.
-      page.cleanup();
-      canvas.width = 0;
-      canvas.height = 0;
-    }
-
-    return pages;
-  } finally {
-    try {
-      await loadingTask.destroy();
-    } catch {
-      // ignore
-    }
+    pages.push({
+      pageNumber: pageNum,
+      dataUrl,
+      width: viewport.width,
+      height: viewport.height,
+    });
   }
+
+  return pages;
 }
