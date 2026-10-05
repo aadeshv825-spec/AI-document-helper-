@@ -24,7 +24,8 @@ export interface RenderedPdfPage {
 export async function renderPdfToImages(
   pdfBuffer: Uint8Array,
   scale: number = 1.5,
-  maxPages: number = 20
+  maxPages: number = 20,
+  onTotalPages?: (totalPages: number) => void
 ): Promise<RenderedPdfPage[]> {
   const loadingTask = pdfjsLib.getDocument({
     data: pdfBuffer,
@@ -33,6 +34,9 @@ export async function renderPdfToImages(
   });
 
   const pdf = await loadingTask.promise;
+  if (onTotalPages) {
+    onTotalPages(pdf.numPages);
+  }
   const numPages = Math.min(pdf.numPages, maxPages);
   const pages: RenderedPdfPage[] = [];
 

@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { PostgresStore } from './db.ts';
 
 export interface StoredUser {
   id: string;
@@ -8,6 +9,7 @@ export interface StoredUser {
   email: string;
   passwordHash?: string;
   salt?: string;
+  passwordIterations?: number;
   googleId?: string;
   avatarUrl?: string;
   authProvider?: 'password' | 'google';
@@ -44,26 +46,28 @@ export interface StoredDocument {
 }
 
 interface StoredSession {
-  token: string;
+  tokenHash: string;
   userId: string;
   createdAt: number;
   expiresAt: number;
 }
 
-const DATA_DIR = path.join(process.cwd(), 'data');
-const USERS_FILE = path.join(DATA_DIR, 'users.json');
-const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
-const DOCUMENTS_FILE = path.join(DATA_DIR, 'documents.json');
-const USAGE_FILE = path.join(DATA_DIR, 'usage.json');
-const PURCHASES_FILE = path.join(DATA_DIR, 'purchases.json');
+export const FREE_DAILY_LIMIT = 5;
 
-// Ensure data directory exists
-try {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+function getDataDir(): string {
+  const dir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+  try {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  } catch (err) {
+    console.warn('[Store] Could not create DATA_DIR:', err);
   }
-} catch (dirErr) {
-  console.warn('Notice: Could not create data directory, using memory store:', dirErr);
+  return dir;
+}
+
+function getFilePath(filename: string): string {
+  return path.join(getDataDir(), filename);
 }
 
 function readJsonFile<T>(filePath: string, defaultValue: T): T {
@@ -86,70 +90,43 @@ function writeJsonFile<T>(filePath: string, data: T): void {
   }
 }
 
-// In-memory cache for speed, backed by file writes
-let users: StoredUser[] = readJsonFile<StoredUser[]>(USERS_FILE, []);
-let sessions: StoredSession[] = readJsonFile<StoredSession[]>(SESSIONS_FILE, []);
-let documents: StoredDocument[] = readJsonFile<StoredDocument[]>(DOCUMENTS_FILE, []);
-let usageMap: Record<string, number> = readJsonFile<Record<string, number>>(USAGE_FILE, {});
-let purchases: GooglePlayPurchaseRecord[] = readJsonFile<GooglePlayPurchaseRecord[]>(PURCHASES_FILE, []);
+let pgStore: PostgresStore | null = null;
+
+// In-memory cache for speed, backed by file writes or PostgreSQL
+let users: StoredUser[] = [];
+let sessions: StoredSession[] = [];
+let documents: StoredDocument[] = [];
+let usageMap: Record<string, number> = {};
+let purchases: GooglePlayPurchaseRecord[] = [];
 
 // App owner & admin email
 export const OWNER_EMAIL = (process.env.OWNER_EMAIL || 'aadeshv825@gmail.com').toLowerCase();
 
 export function isUserAdmin(user: StoredUser | null | undefined): boolean {
   if (!user) return false;
-  if (user.role === 'admin') return true;
-  if (user.email && user.email.toLowerCase() === OWNER_EMAIL) return true;
-  return false;
-}
-
-// Ensure the owner account has admin role
-const ownerUser = users.find((u) => u.email.toLowerCase() === OWNER_EMAIL);
-if (ownerUser) {
-  ownerUser.role = 'admin';
+  // If user claims to be the owner, require authenticating via Google to claim admin privileges
+  if (user.email && user.email.toLowerCase() === OWNER_EMAIL) {
+    return user.authProvider === 'google';
+  }
+  return user.role === 'admin';
 }
 
 function hashPassword(password: string, salt: string): string {
-  return crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512').toString('hex');
+  return crypto.pbkdf2Sync(password, salt, 310000, 64, 'sha512').toString('hex');
 }
 
-// Bootstrap initial owner user if not exists, using secure environment variable if provided
-const ADMIN_INITIAL_PASSWORD = process.env.ADMIN_INITIAL_PASSWORD;
-if (!users.some((u) => u.email.toLowerCase() === OWNER_EMAIL)) {
-  let passwordHash: string | undefined;
-  let salt: string | undefined;
-  if (ADMIN_INITIAL_PASSWORD && ADMIN_INITIAL_PASSWORD.trim().length >= 6) {
-    salt = crypto.randomBytes(16).toString('hex');
-    passwordHash = hashPassword(ADMIN_INITIAL_PASSWORD.trim(), salt);
+function verifyHash(password: string, salt: string, expectedHash: string, iterations?: number): boolean {
+  const iters = iterations || (expectedHash.length === 128 ? 1000 : 310000);
+  if (crypto.pbkdf2Sync(password, salt, iters, 64, 'sha512').toString('hex') === expectedHash) {
+    return true;
   }
-
-  users.push({
-    id: 'user_owner_admin',
-    name: 'Aadesh V',
-    email: OWNER_EMAIL,
-    passwordHash,
-    salt,
-    plan: 'free',
-    role: 'admin',
-    createdAt: Date.now() - 86400000 * 7,
-    preferredLanguage: 'English',
-    authProvider: 'google',
-  });
-  writeJsonFile(USERS_FILE, users);
-
-  // Seed sample document for user
-  documents.push({
-    id: 'sample-doc-1',
-    userId: 'user_owner_admin',
-    title: 'Rental Agreement Summary',
-    type: 'pdf-summary',
-    snippet: 'Residential lease deed for Flat 402, Green Valley Apartments. Rent: ₹26,500/mo.',
-    fullContent: 'RENTAL LEASE SUMMARY\nPremises: Flat 402, Green Valley Apartments, Mumbai 400053.\nMonthly Rent: ₹26,500 due on 5th of each month.\nSecurity Deposit: ₹1,00,000.\nNotice Period: 1 month prior written notice.\nKey Terms: Residential use only; subletting prohibited; maintenance charges of ₹2,200/mo payable to RWA directly.',
-    timestamp: Date.now() - 3600000,
-    isFavorite: true,
-    category: 'Contracts & Legal',
-  });
-  writeJsonFile(DOCUMENTS_FILE, documents);
+  if (crypto.pbkdf2Sync(password, salt, 310000, 64, 'sha512').toString('hex') === expectedHash) {
+    return true;
+  }
+  if (crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512').toString('hex') === expectedHash) {
+    return true;
+  }
+  return false;
 }
 
 export function isUserPro(user: StoredUser | null | undefined): boolean {
@@ -161,10 +138,80 @@ export function isUserPro(user: StoredUser | null | undefined): boolean {
   return true;
 }
 
-
 export function getTodayString(): string {
   return new Date().toISOString().split('T')[0];
 }
+
+export async function initStore(): Promise<void> {
+  const dbUrl = (process.env.DATABASE_URL || '').trim();
+  if (dbUrl) {
+    try {
+      pgStore = new PostgresStore(dbUrl);
+      await pgStore.connectAndMigrate();
+      const loaded = await pgStore.loadAll();
+      users = loaded.users || [];
+      sessions = loaded.sessions || [];
+      documents = loaded.documents || [];
+      usageMap = loaded.usage || {};
+      purchases = loaded.purchases || [];
+      console.log(`[Store] Initialized PostgreSQL store from ${dbUrl.replace(/:[^:]*@/, ':***@')}`);
+      return;
+    } catch (err) {
+      console.error('[Store] Failed to connect to PostgreSQL:', err);
+      if (process.env.REQUIRE_DATABASE === 'true') {
+        throw err;
+      }
+    }
+  }
+
+  // Load from JSON storage
+  users = readJsonFile<StoredUser[]>(getFilePath('users.json'), []);
+  sessions = readJsonFile<any[]>(getFilePath('sessions.json'), []).map((s) => {
+    if (s.token && !s.tokenHash) {
+      return {
+        tokenHash: crypto.createHash('sha256').update(s.token).digest('hex'),
+        userId: s.userId,
+        createdAt: s.createdAt,
+        expiresAt: s.expiresAt,
+      };
+    }
+    return s;
+  });
+  documents = readJsonFile<StoredDocument[]>(getFilePath('documents.json'), []);
+  usageMap = readJsonFile<Record<string, number>>(getFilePath('usage.json'), {});
+  purchases = readJsonFile<GooglePlayPurchaseRecord[]>(getFilePath('purchases.json'), []);
+
+  // Ensure owner user exists in local dev mode
+  const ADMIN_INITIAL_PASSWORD = process.env.ADMIN_INITIAL_PASSWORD;
+  if (!users.some((u) => u.email.toLowerCase() === OWNER_EMAIL)) {
+    let passwordHash: string | undefined;
+    let salt: string | undefined;
+    if (ADMIN_INITIAL_PASSWORD && ADMIN_INITIAL_PASSWORD.trim().length >= 6) {
+      salt = crypto.randomBytes(16).toString('hex');
+      passwordHash = hashPassword(ADMIN_INITIAL_PASSWORD.trim(), salt);
+    }
+
+    users.push({
+      id: 'user_owner_admin',
+      name: 'Aadesh V',
+      email: OWNER_EMAIL,
+      passwordHash,
+      salt,
+      passwordIterations: 310000,
+      plan: 'free',
+      role: 'admin',
+      createdAt: Date.now() - 86400000 * 7,
+      preferredLanguage: 'English',
+      authProvider: 'google',
+    });
+    writeJsonFile(getFilePath('users.json'), users);
+  }
+}
+
+// Initial auto-load at module import
+void initStore().catch((err) => {
+  console.warn('[Store] Initial auto-load note:', err?.message || err);
+});
 
 // -------------------------------------------------------------
 // USER MANAGEMENT
@@ -184,13 +231,19 @@ export function registerUser(name: string, email: string, password: string): { u
     email: normalizedEmail,
     passwordHash,
     salt,
+    passwordIterations: 310000,
     plan: 'free',
+    role: 'user', // Password registration is always normal user
     createdAt: Date.now(),
     preferredLanguage: 'English',
+    authProvider: 'password',
   };
 
   users.push(newUser);
-  writeJsonFile(USERS_FILE, users);
+  writeJsonFile(getFilePath('users.json'), users);
+  if (pgStore) {
+    pgStore.upsertUser(newUser);
+  }
 
   const token = createSession(newUser.id);
   return { user: newUser, token };
@@ -207,13 +260,45 @@ export function authenticateUser(email: string, password: string): { user: Store
     throw new Error('This account was created with Google. Please use "Continue with Google" to sign in.');
   }
 
-  const computedHash = hashPassword(password, user.salt);
-  if (computedHash !== user.passwordHash) {
+  const valid = verifyHash(password, user.salt, user.passwordHash, user.passwordIterations);
+  if (!valid) {
     throw new Error('Incorrect password. Please verify your credentials and try again.');
   }
 
   const token = createSession(user.id);
   return { user, token };
+}
+
+export function setUserPassword(userId: string, newPassword: string): void {
+  if (!newPassword || newPassword.length < 6) {
+    throw new Error('Password must be at least 6 characters long.');
+  }
+  const user = users.find((u) => u.id === userId);
+  if (!user) {
+    throw new Error('User not found.');
+  }
+
+  const salt = crypto.randomBytes(16).toString('hex');
+  const passwordHash = hashPassword(newPassword, salt);
+  user.passwordHash = passwordHash;
+  user.salt = salt;
+  user.passwordIterations = 310000;
+  user.authProvider = user.authProvider || 'password';
+
+  // Invalidate all existing sessions for this user
+  sessions = sessions.filter((s) => s.userId !== userId);
+  writeJsonFile(getFilePath('users.json'), users);
+  writeJsonFile(getFilePath('sessions.json'), sessions);
+  if (pgStore) {
+    pgStore.upsertUser(user);
+    pgStore.deleteSessionsForUser(userId);
+  }
+}
+
+export function verifyUserPassword(userId: string, password: string): boolean {
+  const user = users.find((u) => u.id === userId);
+  if (!user || !user.passwordHash || !user.salt) return false;
+  return verifyHash(password, user.salt, user.passwordHash, user.passwordIterations);
 }
 
 export function findOrCreateGoogleUser(profile: {
@@ -222,31 +307,42 @@ export function findOrCreateGoogleUser(profile: {
   name: string;
   avatarUrl?: string;
 }): { user: StoredUser; token: string } {
-  const normalizedEmail = profile.email.trim().toLowerCase();
+  const normalizedEmail = profile.email.toLowerCase().trim();
   let user = users.find((u) => u.email.toLowerCase() === normalizedEmail);
 
   if (user) {
-    // Existing user: link Google ID and update avatar/name if not custom
     user.googleId = profile.googleId;
+    user.authProvider = 'google';
     if (profile.avatarUrl) user.avatarUrl = profile.avatarUrl;
-    if (!user.name || user.name === 'User') user.name = profile.name;
-    if (!user.authProvider) user.authProvider = 'google';
-    writeJsonFile(USERS_FILE, users);
+    if (profile.name && (!user.name || user.name === 'User' || user.name === 'Google User')) {
+      user.name = profile.name;
+    }
+    // If owner signed in through verified Google, assign admin
+    if (normalizedEmail === OWNER_EMAIL) {
+      user.role = 'admin';
+    }
+    writeJsonFile(getFilePath('users.json'), users);
+    if (pgStore) {
+      pgStore.upsertUser(user);
+    }
   } else {
-    // Brand new user via Google
     user = {
-      id: `user_g_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
-      name: profile.name.trim() || 'Google User',
+      id: `user_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+      name: profile.name || normalizedEmail.split('@')[0],
       email: normalizedEmail,
       googleId: profile.googleId,
       avatarUrl: profile.avatarUrl,
       authProvider: 'google',
       plan: 'free',
+      role: normalizedEmail === OWNER_EMAIL ? 'admin' : 'user',
       createdAt: Date.now(),
       preferredLanguage: 'English',
     };
     users.push(user);
-    writeJsonFile(USERS_FILE, users);
+    writeJsonFile(getFilePath('users.json'), users);
+    if (pgStore) {
+      pgStore.upsertUser(user);
+    }
   }
 
   const token = createSession(user.id);
@@ -255,28 +351,38 @@ export function findOrCreateGoogleUser(profile: {
 
 export function createSession(userId: string): string {
   const token = crypto.randomBytes(32).toString('hex');
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
   const newSession: StoredSession = {
-    token,
+    tokenHash,
     userId,
     createdAt: Date.now(),
     expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000, // 30 days
   };
 
-  sessions = sessions.filter((s) => s.userId !== userId || s.expiresAt > Date.now());
+  sessions = sessions.filter((s) => s.expiresAt > Date.now());
   sessions.push(newSession);
-  writeJsonFile(SESSIONS_FILE, sessions);
+  writeJsonFile(getFilePath('sessions.json'), sessions);
+  if (pgStore) {
+    pgStore.upsertSession(newSession);
+  }
   return token;
 }
 
 export function getUserByToken(token: string): StoredUser | null {
   if (!token) return null;
-  const session = sessions.find((s) => s.token === token && s.expiresAt > Date.now());
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  const session = sessions.find((s) => s.tokenHash === tokenHash && s.expiresAt > Date.now());
   if (!session) return null;
   return users.find((u) => u.id === session.userId) || null;
 }
 
 export function getUserById(userId: string): StoredUser | null {
   return users.find((u) => u.id === userId) || null;
+}
+
+export function getUserByEmail(email: string): StoredUser | null {
+  const normalized = email.trim().toLowerCase();
+  return users.find((u) => u.email.toLowerCase() === normalized) || null;
 }
 
 export function updateUserProfile(
@@ -289,7 +395,10 @@ export function updateUserProfile(
   if (updates.name !== undefined) user.name = updates.name.trim();
   if (updates.preferredLanguage !== undefined) user.preferredLanguage = updates.preferredLanguage;
 
-  writeJsonFile(USERS_FILE, users);
+  writeJsonFile(getFilePath('users.json'), users);
+  if (pgStore) {
+    pgStore.upsertUser(user);
+  }
   return user;
 }
 
@@ -298,8 +407,16 @@ export function updateUserPlan(userId: string, plan: 'free' | 'pro', proUntil?: 
   if (!user) throw new Error('User not found');
 
   user.plan = plan;
-  user.proUntil = plan === 'pro' ? (proUntil || Date.now() + 365 * 86400000) : undefined;
-  writeJsonFile(USERS_FILE, users);
+  if (plan === 'pro') {
+    user.proUntil = proUntil || Date.now() + 30 * 24 * 60 * 60 * 1000;
+  } else {
+    user.proUntil = undefined;
+  }
+
+  writeJsonFile(getFilePath('users.json'), users);
+  if (pgStore) {
+    pgStore.upsertUser(user);
+  }
   return user;
 }
 
@@ -320,8 +437,12 @@ export function getAllUsers(): Array<Omit<StoredUser, 'passwordHash' | 'salt'> &
 }
 
 export function invalidateSession(token: string): void {
-  sessions = sessions.filter((s) => s.token !== token);
-  writeJsonFile(SESSIONS_FILE, sessions);
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  sessions = sessions.filter((s) => s.tokenHash !== tokenHash);
+  writeJsonFile(getFilePath('sessions.json'), sessions);
+  if (pgStore) {
+    pgStore.deleteSession(tokenHash);
+  }
 }
 
 export function deleteUserAccount(userId: string): void {
@@ -329,9 +450,14 @@ export function deleteUserAccount(userId: string): void {
   sessions = sessions.filter((s) => s.userId !== userId);
   documents = documents.filter((d) => d.userId !== userId);
 
-  writeJsonFile(USERS_FILE, users);
-  writeJsonFile(SESSIONS_FILE, sessions);
-  writeJsonFile(DOCUMENTS_FILE, documents);
+  writeJsonFile(getFilePath('users.json'), users);
+  writeJsonFile(getFilePath('sessions.json'), sessions);
+  writeJsonFile(getFilePath('documents.json'), documents);
+  if (pgStore) {
+    pgStore.deleteUser(userId);
+    pgStore.deleteSessionsForUser(userId);
+    pgStore.deleteDocumentsForUser(userId);
+  }
 }
 
 // -------------------------------------------------------------
@@ -379,7 +505,10 @@ export function saveUserDocument(
     documents.unshift(newDoc);
   }
 
-  writeJsonFile(DOCUMENTS_FILE, documents);
+  writeJsonFile(getFilePath('documents.json'), documents);
+  if (pgStore) {
+    pgStore.upsertDocument(newDoc);
+  }
   return newDoc;
 }
 
@@ -395,18 +524,27 @@ export function updateUserDocument(
   if (updates.isFavorite !== undefined) doc.isFavorite = updates.isFavorite;
   if (updates.category !== undefined) doc.category = updates.category;
 
-  writeJsonFile(DOCUMENTS_FILE, documents);
+  writeJsonFile(getFilePath('documents.json'), documents);
+  if (pgStore) {
+    pgStore.upsertDocument(doc);
+  }
   return doc;
 }
 
 export function deleteUserDocument(userId: string, docId: string): void {
   documents = documents.filter((d) => !(d.userId === userId && d.id === docId));
-  writeJsonFile(DOCUMENTS_FILE, documents);
+  writeJsonFile(getFilePath('documents.json'), documents);
+  if (pgStore) {
+    pgStore.deleteDocument(userId, docId);
+  }
 }
 
 export function clearUserDocuments(userId: string): void {
   documents = documents.filter((d) => d.userId !== userId);
-  writeJsonFile(DOCUMENTS_FILE, documents);
+  writeJsonFile(getFilePath('documents.json'), documents);
+  if (pgStore) {
+    pgStore.deleteDocumentsForUser(userId);
+  }
 }
 
 export function syncUserDocuments(
@@ -425,7 +563,7 @@ export function syncUserDocuments(
   for (const clientDoc of clientDocs) {
     const existing = documents.find((d) => d.userId === userId && (d.id === clientDoc.id || d.fullContent === clientDoc.fullContent));
     if (!existing) {
-      documents.unshift({
+      const doc: StoredDocument = {
         id: clientDoc.id || `doc_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
         userId,
         title: clientDoc.title || 'Saved Document',
@@ -435,11 +573,15 @@ export function syncUserDocuments(
         timestamp: clientDoc.timestamp || Date.now(),
         isFavorite: Boolean(clientDoc.isFavorite),
         category: clientDoc.category || 'General',
-      });
+      };
+      documents.unshift(doc);
+      if (pgStore) {
+        pgStore.upsertDocument(doc);
+      }
     }
   }
 
-  writeJsonFile(DOCUMENTS_FILE, documents);
+  writeJsonFile(getFilePath('documents.json'), documents);
   return getUserDocuments(userId);
 }
 
@@ -474,7 +616,7 @@ export function getDailyUsage(identifier: string, isPro: boolean): { dailyUsed: 
   const dailyUsed = usageMap[key] || 0;
   return {
     dailyUsed,
-    dailyLimit: isPro ? 999999 : 5,
+    dailyLimit: isPro ? 999999 : FREE_DAILY_LIMIT,
     dateString: today,
   };
 }
@@ -482,7 +624,37 @@ export function getDailyUsage(identifier: string, isPro: boolean): { dailyUsed: 
 export function canPerformAiAction(identifier: string, isPro: boolean): boolean {
   if (isPro) return true;
   const usage = getDailyUsage(identifier, isPro);
-  return usage.dailyUsed < 5;
+  return usage.dailyUsed < FREE_DAILY_LIMIT;
+}
+
+export function reserveDailyUsage(identifier: string, isPro: boolean): { allowed: boolean; key: string } {
+  if (isPro) {
+    return { allowed: true, key: '' };
+  }
+  const today = getTodayString();
+  const key = `${identifier}_${today}`;
+  const current = usageMap[key] || 0;
+  if (current >= FREE_DAILY_LIMIT) {
+    return { allowed: false, key: '' };
+  }
+  usageMap[key] = current + 1;
+  writeJsonFile(getFilePath('usage.json'), usageMap);
+  if (pgStore) {
+    pgStore.upsertUsage(key, usageMap[key]);
+  }
+  return { allowed: true, key };
+}
+
+export function releaseDailyUsage(key: string): void {
+  if (!key) return;
+  const current = usageMap[key] || 0;
+  if (current > 0) {
+    usageMap[key] = current - 1;
+    writeJsonFile(getFilePath('usage.json'), usageMap);
+    if (pgStore) {
+      pgStore.upsertUsage(key, usageMap[key]);
+    }
+  }
 }
 
 export function incrementDailyUsage(identifier: string): number {
@@ -490,7 +662,10 @@ export function incrementDailyUsage(identifier: string): number {
   const key = `${identifier}_${today}`;
   const current = usageMap[key] || 0;
   usageMap[key] = current + 1;
-  writeJsonFile(USAGE_FILE, usageMap);
+  writeJsonFile(getFilePath('usage.json'), usageMap);
+  if (pgStore) {
+    pgStore.upsertUsage(key, usageMap[key]);
+  }
   return usageMap[key];
 }
 
@@ -522,13 +697,29 @@ export function getAllGooglePlayPurchases(): GooglePlayPurchaseRecord[] {
 }
 
 export function recordGooglePlayPurchase(record: GooglePlayPurchaseRecord): GooglePlayPurchaseRecord {
-  // Update or insert
-  const idx = purchases.findIndex((p) => p.purchaseToken === record.purchaseToken);
-  if (idx >= 0) {
-    purchases[idx] = record;
+  const existing = purchases.find((p) => p.purchaseToken === record.purchaseToken);
+  if (existing) {
+    if (existing.userId !== record.userId) {
+      throw new Error(`Google Play purchase token is already registered to user ${existing.userId}. Cannot transfer purchase tokens between accounts.`);
+    }
+    Object.assign(existing, record);
   } else {
     purchases.unshift(record);
   }
-  writeJsonFile(PURCHASES_FILE, purchases);
+  writeJsonFile(getFilePath('purchases.json'), purchases);
+  if (pgStore) {
+    pgStore.upsertPurchase(record);
+  }
   return record;
+}
+
+export function getWriteMark(): number {
+  return pgStore ? pgStore.writeMark() : Date.now();
+}
+
+export async function confirmPersisted(mark: number): Promise<boolean> {
+  if (pgStore) {
+    return pgStore.waitForWrites(mark);
+  }
+  return true;
 }

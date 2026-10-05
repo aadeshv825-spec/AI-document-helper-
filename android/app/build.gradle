@@ -11,8 +11,8 @@ android {
         applicationId "com.aidocumenthelper.app"
         minSdk 24
         targetSdk 36
-        versionCode 4
-        versionName "1.0.0"
+        versionCode (System.getenv("VERSION_CODE") ? Integer.parseInt(System.getenv("VERSION_CODE")) : 4)
+        versionName (System.getenv("VERSION_NAME") ?: "1.0.0")
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -22,10 +22,26 @@ android {
 
     signingConfigs {
         release {
-            storeFile file(System.getenv("KEYSTORE_FILE") ?: "release.keystore")
-            storePassword System.getenv("KEYSTORE_PASSWORD")
-            keyAlias System.getenv("KEY_ALIAS") ?: "aidocumenthelper"
-            keyPassword System.getenv("KEY_PASSWORD")
+            def uploadKeystore = file("upload-keystore.jks")
+            def envKeystore = System.getenv("KEYSTORE_FILE") ? file(System.getenv("KEYSTORE_FILE")) : null
+            def localKeystore = file("release.keystore")
+
+            if (uploadKeystore.exists()) {
+                storeFile uploadKeystore
+                storePassword System.getenv("NEW_UPLOAD_KEY_PASSWORD") ?: System.getenv("KEYSTORE_PASSWORD")
+                keyAlias System.getenv("KEY_ALIAS") ?: "upload"
+                keyPassword System.getenv("NEW_UPLOAD_KEY_PASSWORD") ?: System.getenv("KEY_PASSWORD") ?: System.getenv("KEYSTORE_PASSWORD")
+            } else if (envKeystore && envKeystore.exists()) {
+                storeFile envKeystore
+                storePassword System.getenv("KEYSTORE_PASSWORD")
+                keyAlias System.getenv("KEY_ALIAS") ?: "aidocumenthelper"
+                keyPassword System.getenv("KEY_PASSWORD") ?: System.getenv("KEYSTORE_PASSWORD")
+            } else if (localKeystore.exists()) {
+                storeFile localKeystore
+                storePassword System.getenv("KEYSTORE_PASSWORD")
+                keyAlias System.getenv("KEY_ALIAS") ?: "aidocumenthelper"
+                keyPassword System.getenv("KEY_PASSWORD") ?: System.getenv("KEYSTORE_PASSWORD")
+            }
         }
     }
 

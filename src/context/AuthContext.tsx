@@ -239,14 +239,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             const cleanup = () => {
               window.removeEventListener('onNativeGoogleSignInSuccess' as any, handleSuccess);
               window.removeEventListener('onNativeGoogleSignInError' as any, handleError);
-              delete window.onNativeGoogleSignInSuccess;
-              delete window.onNativeGoogleSignInError;
+              delete (window as any).onNativeGoogleSignInSuccess;
+              delete (window as any).onNativeGoogleSignInError;
             };
 
             window.addEventListener('onNativeGoogleSignInSuccess' as any, handleSuccess);
             window.addEventListener('onNativeGoogleSignInError' as any, handleError);
-            window.onNativeGoogleSignInSuccess = (data) => handleSuccess({ detail: data });
-            window.onNativeGoogleSignInError = (data) => handleError({ detail: data });
+            (window as any).onNativeGoogleSignInSuccess = (data: any) => handleSuccess({ detail: data });
+            (window as any).onNativeGoogleSignInError = (data: any) => handleError({ detail: data });
           });
         }
       }

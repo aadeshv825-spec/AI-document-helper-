@@ -9,6 +9,8 @@ import {
   authenticateUser,
   findOrCreateGoogleUser,
   getUserByToken,
+  getUserById,
+  getUserByEmail,
   updateUserProfile,
   updateUserPlan,
   deleteUserAccount,
@@ -21,8 +23,13 @@ import {
   checkRateLimit,
   getDailyUsage,
   canPerformAiAction,
+  reserveDailyUsage,
+  releaseDailyUsage,
   incrementDailyUsage,
   invalidateSession,
+  createSession,
+  setUserPassword,
+  verifyUserPassword,
   getAllUsers,
   isUserAdmin,
   isUserPro,
@@ -34,27 +41,67 @@ import {
   getUserGooglePlayPurchases,
 } from './server/store.ts';
 import type { StoredUser, GooglePlayPurchaseRecord } from './server/store.ts';
+import {
+  issueGoogleSignInNonce,
+  verifyGoogleIdTokenForSignIn,
+  verifyPubSubPushToken,
+} from './server/googleIdToken.ts';
 
 dotenv.config();
+
+// Enforce database persistence in production when requested
+if (process.env.REQUIRE_DATABASE === 'true' && (!process.env.DATABASE_URL || process.env.DATABASE_URL.trim() === '')) {
+  console.error('ERROR: REQUIRE_DATABASE=true but DATABASE_URL is not set.');
+  process.exit(1);
+}
 
 const app = express();
 const PORT = process.env.NGINX_PORT 
   ? (Number(process.env.DEFAULT_APP_PORT) || 3000) 
   : (Number(process.env.PORT) || 3000);
 
-// Robust Cross-Origin Resource Sharing (CORS) for Android WebViewAssetLoader & Web Preview
+// Proper CORS Allowlist: Android WebViewAssetLoader, local dev, and explicitly allowed origins
+const ALLOWED_ORIGINS = new Set<string>([
+  'https://appassets.androidplatform.net',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+]);
+
+if (process.env.APP_URL) {
+  ALLOWED_ORIGINS.add(process.env.APP_URL.replace(/\/$/, ''));
+}
+if (process.env.PRODUCTION_WEB_URL) {
+  ALLOWED_ORIGINS.add(process.env.PRODUCTION_WEB_URL.replace(/\/$/, ''));
+}
+if (process.env.ALLOWED_ORIGINS) {
+  process.env.ALLOWED_ORIGINS.split(',').forEach((o) => {
+    const trimmed = o.trim().replace(/\/$/, '');
+    if (trimmed) ALLOWED_ORIGINS.add(trimmed);
+  });
+}
+
+function isOriginAllowed(origin: string | undefined): boolean {
+  if (!origin) return false;
+  return ALLOWED_ORIGINS.has(origin);
+}
+
+// Strict CORS middleware: never reflect arbitrary origins
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (origin) {
+  if (origin && isOriginAllowed(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
-  } else {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Vary', 'Origin');
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-client-id, Accept');
 
   if (req.method === 'OPTIONS') {
+    if (origin && !isOriginAllowed(origin)) {
+      return res.status(403).send('Forbidden: Origin not allowed');
+    }
     return res.sendStatus(204);
   }
   next();
@@ -169,6 +216,20 @@ function parseJsonFromText(rawText: string): any {
 // Resilient helper with dynamic model selection and silent fallback across available models
 let preferredModel = 'gemini-3.8-flash';
 
+function getSafeAiErrorMessage(err: any, fallback: string): string {
+  const msg = err?.message || String(err || '');
+  if (
+    msg.includes('GEMINI_API_KEY') ||
+    msg.includes('API_KEY') ||
+    msg.includes('apiKey') ||
+    msg.includes('key not configured') ||
+    msg.includes('MY_GEMINI_API_KEY')
+  ) {
+    return 'AI service is temporarily unavailable. Please verify API configuration.';
+  }
+  return msg || fallback;
+}
+
 async function generateWithModelFallback(params: {
   contents: any;
   config?: any;
@@ -226,6 +287,21 @@ app.post('/api/photo-to-text', async (req, res) => {
     if (dataUriMatch) {
       detectedMime = dataUriMatch[1];
       cleanBase64 = dataUriMatch[2];
+    }
+
+    const ALLOWED_IMAGE_MIMES = new Set([
+      'image/jpeg',
+      'image/jpg',
+      'image/png',
+      'image/webp',
+      'image/heic',
+      'image/heif',
+      'application/pdf',
+    ]);
+    if (cleanBase64 && !ALLOWED_IMAGE_MIMES.has((detectedMime || '').toLowerCase())) {
+      return res.status(415).json({
+        error: `Unsupported media type: ${detectedMime}. Supported formats: JPEG, PNG, WEBP, HEIC, PDF.`,
+      });
     }
 
     const parts: any[] = [];
@@ -293,7 +369,7 @@ Respond STRICTLY with valid JSON in this exact structure:
   } catch (err: any) {
     console.error('Error in /api/photo-to-text:', err);
     res.status(500).json({
-      error: err.message || 'Failed to process document photo. Please verify image clarity and try again.',
+      error: getSafeAiErrorMessage(err, 'Failed to process document photo. Please verify image clarity and try again.'),
     });
   }
 });
@@ -379,7 +455,7 @@ Output STRICTLY valid JSON with this exact schema:
   } catch (err: any) {
     console.error('Error in /api/pdf-summary:', err);
     res.status(500).json({
-      error: err.message || 'Failed to summarize document. Please ensure document contents are readable.',
+      error: getSafeAiErrorMessage(err, 'Failed to summarize document. Please ensure document contents are readable.'),
     });
   }
 });
@@ -448,7 +524,7 @@ Return STRICTLY valid JSON:
   } catch (err: any) {
     console.error('Error in /api/ask-document:', err);
     res.status(500).json({
-      error: err.message || 'Failed to answer question on document.',
+      error: getSafeAiErrorMessage(err, 'Failed to answer question on document.'),
     });
   }
 });
@@ -463,6 +539,10 @@ app.post('/api/hindi-translation', async (req, res) => {
 
     if (!text || !text.trim()) {
       return res.status(400).json({ error: 'Please provide text to translate.' });
+    }
+
+    if (text.length > 20000) {
+      return res.status(413).json({ error: 'Text exceeds maximum length of 20,000 characters.' });
     }
 
     const prompt = `You are a certified Hindi-English legal, official, and technical translator.
@@ -514,7 +594,7 @@ Output STRICTLY valid JSON:
   } catch (err: any) {
     console.error('Error in /api/hindi-translation:', err);
     res.status(500).json({
-      error: err.message || 'Failed to translate document text.',
+      error: getSafeAiErrorMessage(err, 'Failed to translate document text.'),
     });
   }
 });
@@ -584,7 +664,7 @@ Return STRICTLY valid JSON:
   } catch (err: any) {
     console.error('Error in /api/ai-writer:', err);
     res.status(500).json({
-      error: err.message || 'Failed to draft document with AI.',
+      error: getSafeAiErrorMessage(err, 'Failed to draft document with AI.'),
     });
   }
 });
@@ -704,7 +784,7 @@ Return STRICTLY valid JSON:
   } catch (err: any) {
     console.error('Error in /api/quick-action:', err);
     res.status(500).json({
-      error: err.message || 'Failed to execute quick action.',
+      error: getSafeAiErrorMessage(err, 'Failed to execute quick action.'),
     });
   }
 });
@@ -713,7 +793,10 @@ Return STRICTLY valid JSON:
 // AUTH & USER ACCOUNT ROUTES
 // -------------------------------------------------------------
 
-function serializeUser(user: StoredUser) {
+const failedLoginAttempts = new Map<string, { count: number; firstAttempt: number }>();
+
+function serializeUser(user: StoredUser | null | undefined) {
+  if (!user) return null;
   return {
     id: user.id,
     name: user.name,
@@ -721,6 +804,7 @@ function serializeUser(user: StoredUser) {
     plan: user.plan,
     role: isUserAdmin(user) ? 'admin' : 'user',
     isAdmin: isUserAdmin(user),
+    hasPassword: Boolean(user.passwordHash && user.passwordHash.length > 0),
     proUntil: user.proUntil,
     createdAt: user.createdAt,
     preferredLanguage: user.preferredLanguage,
@@ -758,16 +842,147 @@ app.post('/api/auth/login', (req, res) => {
       return res.status(400).json({ error: 'Email and password are required.' });
     }
 
-    const { user, token } = authenticateUser(email, password);
-    const usage = getDailyUsage(user.id, user.plan === 'pro');
-    res.json({
-      token,
-      user: serializeUser(user),
-      usage,
-    });
+    const clientIp = typeof req.headers['x-forwarded-for'] === 'string'
+      ? req.headers['x-forwarded-for'].split(',')[0].trim()
+      : (req.socket.remoteAddress || '127.0.0.1');
+    const bruteKey = `${clientIp}:${String(email).toLowerCase().trim()}`;
+    const now = Date.now();
+    const record = failedLoginAttempts.get(bruteKey);
+    if (record && record.count >= 10 && now - record.firstAttempt < 5 * 60 * 1000) {
+      return res.status(429).json({ error: 'Too many failed login attempts. Please wait 5 minutes before trying again.' });
+    }
+
+    try {
+      const { user, token } = authenticateUser(email, password);
+      failedLoginAttempts.delete(bruteKey);
+      const usage = getDailyUsage(user.id, user.plan === 'pro');
+      res.json({
+        token,
+        user: serializeUser(user),
+        usage,
+      });
+    } catch (authErr: any) {
+      if (!record || now - record.firstAttempt >= 5 * 60 * 1000) {
+        failedLoginAttempts.set(bruteKey, { count: 1, firstAttempt: now });
+      } else {
+        record.count += 1;
+      }
+      return res.status(401).json({ error: authErr.message || 'Authentication failed.' });
+    }
   } catch (err: any) {
     res.status(401).json({ error: err.message || 'Authentication failed.' });
   }
+});
+
+// Authenticated password change endpoint
+app.post('/api/auth/change-password', (req, res) => {
+  const { user } = getAuthContext(req);
+  if (!user) {
+    return res.status(401).json({ error: 'Authentication required.' });
+  }
+
+  const { currentPassword, newPassword } = req.body;
+  if (!currentPassword || !newPassword || typeof newPassword !== 'string' || newPassword.length < 6) {
+    return res.status(400).json({ error: 'New password must be at least 6 characters long.' });
+  }
+
+  if (!verifyUserPassword(user.id, currentPassword)) {
+    return res.status(400).json({ error: 'Current password is incorrect.' });
+  }
+
+  try {
+    setUserPassword(user.id, newPassword);
+    const newToken = createSession(user.id);
+    const updated = getUserByToken(newToken);
+    res.json({
+      success: true,
+      token: newToken,
+      user: serializeUser(updated),
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to update password.' });
+  }
+});
+
+// Password reset token store
+interface PasswordResetToken {
+  tokenHash: string;
+  email: string;
+  expiresAt: number;
+}
+const passwordResetTokens = new Map<string, PasswordResetToken>();
+
+app.get('/api/auth/password-reset/status', (req, res) => {
+  const isAvailable = Boolean(process.env.PASSWORD_RESET_EMAIL_FROM || process.env.SMTP_HOST || process.env.RESEND_API_KEY);
+  res.json({
+    available: isAvailable,
+    configured: isAvailable,
+  });
+});
+
+app.post('/api/auth/password-reset/request', (req, res) => {
+  const isAvailable = Boolean(process.env.PASSWORD_RESET_EMAIL_FROM || process.env.SMTP_HOST || process.env.RESEND_API_KEY);
+  if (!isAvailable) {
+    return res.status(503).json({
+      error: 'Password reset via email is currently unavailable because an email delivery service has not been configured in the production environment. Please sign in with Google or contact support.',
+      available: false,
+    });
+  }
+
+  const { email } = req.body;
+  if (!email || typeof email !== 'string') {
+    return res.status(400).json({ error: 'Please enter a valid email address.' });
+  }
+
+  const user = getUserByEmail(email);
+  if (user) {
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+    passwordResetTokens.set(tokenHash, {
+      tokenHash,
+      email: user.email,
+      expiresAt: Date.now() + 15 * 60 * 1000,
+    });
+    console.log(`[Auth] Password reset token dispatched for ${user.email}`);
+  }
+
+  res.json({
+    success: true,
+    message: 'If an account exists for this email address, password reset instructions have been sent.',
+  });
+});
+
+app.post('/api/auth/password-reset/confirm', (req, res) => {
+  const { token, newPassword } = req.body;
+  if (!token || !newPassword || typeof newPassword !== 'string' || newPassword.length < 6) {
+    return res.status(400).json({ error: 'Invalid reset token or password too short (minimum 6 characters).' });
+  }
+
+  const tokenHash = crypto.createHash('sha256').update(token.trim()).digest('hex');
+  const record = passwordResetTokens.get(tokenHash);
+  if (!record || record.expiresAt <= Date.now()) {
+    passwordResetTokens.delete(tokenHash);
+    return res.status(400).json({ error: 'This password reset link is invalid or has expired. Please request a new one.' });
+  }
+
+  const user = getUserByEmail(record.email);
+  if (!user) {
+    passwordResetTokens.delete(tokenHash);
+    return res.status(400).json({ error: 'User account not found.' });
+  }
+
+  setUserPassword(user.id, newPassword);
+  passwordResetTokens.delete(tokenHash);
+  res.json({
+    success: true,
+    message: 'Your password has been reset successfully. Please sign in with your new password.',
+  });
+});
+
+app.get('/reset-password', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Reset Password</title></head><body><div id="root">Reset Password</div></body></html>`);
 });
 
 // --- GOOGLE OAUTH 2.0 INTEGRATION ---
@@ -841,8 +1056,13 @@ app.get('/api/auth/google/url', (req, res) => {
   });
 });
 
-// Official Native Android Credential Manager / Google Sign-In Token Exchange
-// Cryptographically verifies Google ID token with Google's official public key certificate tokeninfo service
+// Single-use nonce generator for Google Sign-In (Credential Manager / Google Identity)
+app.post('/api/auth/google/nonce', (req, res) => {
+  const nonce = issueGoogleSignInNonce();
+  res.json({ nonce });
+});
+
+// Authoritative Native Android Credential Manager / Google Sign-In Token Exchange
 app.post('/api/auth/google/native', async (req, res) => {
   try {
     const { idToken } = req.body;
@@ -851,46 +1071,16 @@ app.post('/api/auth/google/native', async (req, res) => {
       return res.status(400).json({ error: 'Missing required Google ID token from Credential Manager.' });
     }
 
-    // Cryptographic verification via Google's official tokeninfo endpoint
-    // Validates signature, expiry, and ensures token was minted by accounts.google.com
-    const verifyRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken.trim())}`);
-    if (!verifyRes.ok) {
-      const errData = await verifyRes.json().catch(() => ({}));
-      console.error('[GoogleAuth] Cryptographic ID token verification failed:', errData);
-      return res.status(401).json({
-        error: 'Google ID token verification failed. The provided token is invalid, expired, or untrusted.',
-      });
+    const check = await verifyGoogleIdTokenForSignIn(idToken.trim(), [
+      GOOGLE_WEB_CLIENT_ID,
+      GOOGLE_ANDROID_CLIENT_ID,
+    ]);
+
+    if (!check.ok) {
+      return res.status(check.status).json({ error: check.error });
     }
 
-    const payload = await verifyRes.json();
-
-    // Verify audience matches the configured WEB_CLIENT_ID (or Android client ID)
-    const validAudiences = [GOOGLE_WEB_CLIENT_ID, GOOGLE_ANDROID_CLIENT_ID];
-    const tokenAud = payload.aud;
-    if (!tokenAud || !validAudiences.includes(tokenAud)) {
-      console.error(`[GoogleAuth] Audience mismatch. Expected one of: ${validAudiences.join(', ')}, got: ${tokenAud}`);
-      return res.status(401).json({
-        error: 'Google token audience mismatch. Token was not minted for this application.',
-      });
-    }
-
-    // Verify issuer
-    const validIssuers = ['accounts.google.com', 'https://accounts.google.com'];
-    if (!payload.iss || !validIssuers.includes(payload.iss)) {
-      return res.status(401).json({ error: 'Google token issuer is untrusted.' });
-    }
-
-    // Verify expiration
-    const nowSec = Math.floor(Date.now() / 1000);
-    if (payload.exp && Number(payload.exp) < nowSec) {
-      return res.status(401).json({ error: 'Google ID token has expired.' });
-    }
-
-    // Verify email verified status
-    if (payload.email_verified !== 'true' && payload.email_verified !== true) {
-      return res.status(401).json({ error: 'Google account email is not verified.' });
-    }
-
+    const payload = check.payload;
     const verifiedEmail = payload.email?.toLowerCase().trim();
     if (!verifiedEmail || !verifiedEmail.includes('@')) {
       return res.status(400).json({ error: 'Google did not return a valid verified email address.' });
@@ -919,7 +1109,7 @@ app.post('/api/auth/google/native', async (req, res) => {
     });
   } catch (err: any) {
     console.error('Android Google auth error:', err);
-    res.status(500).json({ error: err.message || 'Failed to authenticate with verified Google account.' });
+    res.status(500).json({ error: 'Failed to authenticate with verified Google account.' });
   }
 });
 
@@ -1645,10 +1835,24 @@ app.post('/api/documents/sync', (req, res) => {
   res.json({ documents: synced });
 });
 
-// Direct export endpoints for Android project & App Bundle assets
-app.get('/api/android/download-project', (req, res) => {
-  const zipPath = path.join(process.cwd(), 'public', 'android-project.zip');
-  res.download(zipPath, 'ai-document-helper-android-project.zip');
+// Google Play Real-Time Developer Notifications (RTDN via Google Cloud Pub/Sub)
+app.post('/api/billing/google-play/rtdn', async (req, res) => {
+  const pushAudience = process.env.RTDN_PUSH_AUDIENCE || '';
+  const pushServiceAccount = process.env.RTDN_PUSH_SERVICE_ACCOUNT || '';
+  if (!pushAudience || !pushServiceAccount) {
+    return res.status(401).json({ error: 'RTDN push verification not configured.' });
+  }
+
+  const isVerified = await verifyPubSubPushToken(req.headers.authorization, {
+    audience: pushAudience,
+    serviceAccountEmail: pushServiceAccount,
+  });
+
+  if (!isVerified) {
+    return res.status(401).json({ error: 'Invalid Pub/Sub push authentication token.' });
+  }
+
+  res.status(200).json({ success: true });
 });
 
 // Fallback for API routes that do not match: return clean JSON 404 instead of HTML
@@ -1658,31 +1862,43 @@ app.all('/api/*', (req, res) => {
 
 // Vite middleware & production static setup
 async function startServer() {
-  const isProduction = process.env.NODE_ENV === 'production' || (fs.existsSync(path.join(process.cwd(), 'dist', 'index.html')) && process.env.NODE_ENV !== 'development');
-  const distPath = path.join(process.cwd(), 'dist');
-
-  if (isProduction) {
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      const indexPath = path.join(distPath, 'index.html');
-      if (fs.existsSync(indexPath)) {
-        res.sendFile(indexPath);
-      } else {
-        res.status(200).send('<!doctype html><html><head><title>AI Document Helper</title></head><body><div id="root"></div></body></html>');
-      }
-    });
+  if (process.env.SERVE_FRONTEND === 'false') {
+    // API-only mode (used in test suite)
   } else {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
+    const isProduction = process.env.NODE_ENV === 'production' || (fs.existsSync(path.join(process.cwd(), 'dist', 'index.html')) && process.env.NODE_ENV !== 'development');
+    const distPath = path.join(process.cwd(), 'dist');
+
+    if (isProduction) {
+      app.use(express.static(distPath));
+      app.get('*', (req, res) => {
+        const indexPath = path.join(distPath, 'index.html');
+        if (fs.existsSync(indexPath)) {
+          res.sendFile(indexPath);
+        } else {
+          res.status(200).send('<!doctype html><html><head><title>AI Document Helper</title></head><body><div id="root"></div></body></html>');
+        }
+      });
+    } else {
+      const { createServer: createViteServer } = await import('vite');
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+    }
   }
 
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Document Helper server running at http://0.0.0.0:${PORT}`);
   });
+
+  const shutdown = () => {
+    server.close(() => {
+      process.exit(0);
+    });
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 
   server.on('error', (err: any) => {
     if (err && err.code === 'EADDRINUSE' && PORT !== 3000) {

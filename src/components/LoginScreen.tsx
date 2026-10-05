@@ -25,12 +25,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueAsGuest }) =
 
     try {
       const res = await signInWithGoogle();
-      if (!res.success) {
-        if (res.requiresConfig) {
-          setError(res.error || 'Google Sign-In is not configured yet.');
-        } else if (res.error) {
-          setError(res.error);
-        }
+      if (!res.success && res.error) {
+        setError(res.error);
       }
     } catch (err: any) {
       setError(err?.message || 'Google Sign-In failed.');

@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { google } from 'googleapis';
+import { OAuth2Client } from 'google-auth-library';
 
 // -------------------------------------------------------------
 // Google ID token nonce & replay protection
@@ -51,11 +51,11 @@ export function issueGoogleSignInNonce(): string {
   return nonce;
 }
 
-let googleIdTokenVerifier: InstanceType<typeof google.auth.OAuth2> | null = null;
+let googleIdTokenVerifier: OAuth2Client | null = null;
 
-function getGoogleIdTokenVerifier() {
+function getGoogleIdTokenVerifier(): OAuth2Client {
   if (!googleIdTokenVerifier) {
-    googleIdTokenVerifier = new google.auth.OAuth2();
+    googleIdTokenVerifier = new OAuth2Client();
   }
 
   return googleIdTokenVerifier;

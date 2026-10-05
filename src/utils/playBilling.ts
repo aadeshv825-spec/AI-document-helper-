@@ -33,6 +33,14 @@ export const PLAY_STORE_PRODUCTS: PlayBillingProduct[] = [
   },
 ];
 
+export function getPlayProductPrices(): Partial<Record<PlayStoreSku, string>> {
+  const prices: Partial<Record<PlayStoreSku, string>> = {};
+  for (const product of PLAY_STORE_PRODUCTS) {
+    prices[product.sku] = product.price;
+  }
+  return prices;
+}
+
 declare global {
   interface Window {
     AndroidPlayBilling?: {
