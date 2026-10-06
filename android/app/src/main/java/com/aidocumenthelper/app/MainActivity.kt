@@ -26,6 +26,17 @@ import java.util.*
 
 class MainActivity : AppCompatActivity() {
 
+    companion object {
+        const val LOCAL_ASSET_ORIGIN = "https://appassets.androidplatform.net"
+
+        @JvmStatic
+        fun isTrustedAppUrl(url: String?): Boolean {
+            if (url.isNullOrBlank()) return false
+            val trimmed = url.trim()
+            return trimmed.startsWith("$LOCAL_ASSET_ORIGIN/") || trimmed == LOCAL_ASSET_ORIGIN
+        }
+    }
+
     private val tag = "MainActivity"
     private lateinit var webView: WebView
     private lateinit var assetLoader: WebViewAssetLoader

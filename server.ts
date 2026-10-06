@@ -39,6 +39,13 @@ import {
   findGooglePlayPurchaseByToken,
   recordGooglePlayPurchase,
   getUserGooglePlayPurchases,
+  checkDatabaseReadiness,
+  hasProcessedRtdnEvent,
+  recordRtdnEvent,
+  getLastRtdnEventTime,
+  savePendingPurchase,
+  getPendingPurchase,
+  deletePendingPurchase,
 } from './server/store.ts';
 import type { StoredUser, GooglePlayPurchaseRecord } from './server/store.ts';
 import {
@@ -186,6 +193,24 @@ app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     hasGeminiKey: isConfigured,
+  });
+});
+
+// Production Readiness endpoint (verifies database dependency when configured)
+app.get('/api/health/ready', async (req, res) => {
+  const dbStatus = await checkDatabaseReadiness();
+  if (!dbStatus.ready) {
+    return res.status(503).json({
+      status: 'unhealthy',
+      ready: false,
+      database: dbStatus.configured ? 'down' : 'missing',
+      error: dbStatus.error,
+    });
+  }
+  res.json({
+    status: 'ok',
+    ready: true,
+    database: dbStatus.configured ? 'connected' : 'not_configured',
   });
 });
 
@@ -1564,16 +1589,31 @@ app.post('/api/billing/google-play/verify-purchase', async (req, res) => {
     });
   }
 
-  // Query authoritative current state from Google Play Developer API
+  // Query authoritative current state from Google Play Subscriptions V2 API
   const verification = await verifySubscriptionWithGooglePlay(
     PLAY_PACKAGE_NAME,
     sku,
     cleanToken
   );
 
-  if (!verification.valid) {
+  // Cross-account external account identity check
+  if (verification.obfuscatedExternalAccountId && verification.obfuscatedExternalAccountId !== user.id) {
+    return res.status(403).json({
+      error: 'This Google Play purchase was made by a different account. Cross-account purchase transfer is not allowed.',
+    });
+  }
+
+  // Pending purchase bound to another account check
+  const pending = await getPendingPurchase(cleanToken);
+  if (pending && pending.obfuscatedExternalAccountId && pending.obfuscatedExternalAccountId !== user.id) {
+    return res.status(403).json({
+      error: 'This Google Play purchase is bound to another user account.',
+    });
+  }
+
+  if (!verification.valid || !verification.isProEntitled) {
     return res.status(400).json({
-      error: verification.errorMessage || 'Failed to verify subscription with Google Play.',
+      error: verification.errorMessage || `Subscription status "${verification.status}" does not entitle active Pro access.`,
       status: verification.status,
     });
   }
@@ -1589,6 +1629,17 @@ app.post('/api/billing/google-play/verify-purchase', async (req, res) => {
   // Authoritative expiry time from Google Play
   const proUntil = verification.expiryTimeMillis;
 
+  // Handle replaced previous purchase token if upgrade/downgrade/resubscribe
+  if (verification.linkedPurchaseToken) {
+    const oldPurchase = findGooglePlayPurchaseByToken(verification.linkedPurchaseToken);
+    if (oldPurchase && oldPurchase.userId === user.id) {
+      oldPurchase.state = 'REPLACED';
+      recordGooglePlayPurchase(oldPurchase);
+    }
+  }
+
+  await deletePendingPurchase(cleanToken);
+
   // 1. Activate Pro on user profile using authoritative Google expiry
   const updated = updateUserPlan(user.id, 'pro', proUntil);
 
@@ -1602,7 +1653,7 @@ app.post('/api/billing/google-play/verify-purchase', async (req, res) => {
     packageName: verification.packageName,
     purchaseTime: verification.purchaseTimeMillis,
     expiryTime: proUntil,
-    state: 'VERIFIED',
+    state: verification.status === 'CANCELLED_ACTIVE' ? 'CANCELLED_ACTIVE' : 'VERIFIED',
     verifiedAt: now,
   };
   recordGooglePlayPurchase(purchaseRecord);
@@ -1672,7 +1723,21 @@ app.post('/api/billing/google-play/restore-purchases', async (req, res) => {
 
     for (const sku of skusToCheck) {
       const result = await verifySubscriptionWithGooglePlay(PLAY_PACKAGE_NAME, sku, token);
-      if (result.valid && result.expiryTimeMillis > now) {
+      // Verify external account binding: do not restore if bound to a different user
+      if (result.obfuscatedExternalAccountId && result.obfuscatedExternalAccountId !== user.id) {
+        continue;
+      }
+
+      if (result.isProEntitled && result.expiryTimeMillis > now) {
+        if (result.linkedPurchaseToken) {
+          const oldPurchase = findGooglePlayPurchaseByToken(result.linkedPurchaseToken);
+          if (oldPurchase && oldPurchase.userId === user.id) {
+            oldPurchase.state = 'REPLACED';
+            recordGooglePlayPurchase(oldPurchase);
+          }
+        }
+        await deletePendingPurchase(token);
+
         const record: GooglePlayPurchaseRecord = {
           id: existing?.id || `gp_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
           userId: user.id,
@@ -1682,7 +1747,7 @@ app.post('/api/billing/google-play/restore-purchases', async (req, res) => {
           packageName: result.packageName,
           purchaseTime: result.purchaseTimeMillis,
           expiryTime: result.expiryTimeMillis,
-          state: 'VERIFIED',
+          state: result.status === 'CANCELLED_ACTIVE' ? 'CANCELLED_ACTIVE' : 'VERIFIED',
           verifiedAt: now,
         };
         recordGooglePlayPurchase(record);
@@ -1690,7 +1755,7 @@ app.post('/api/billing/google-play/restore-purchases', async (req, res) => {
           activePurchase = record;
         }
         break;
-      } else if (existing && (result.status === 'EXPIRED' || result.status === 'REVOKED')) {
+      } else if (existing && (result.status === 'EXPIRED' || result.status === 'REVOKED' || result.status === 'ON_HOLD' || result.status === 'PAUSED')) {
         existing.state = result.status;
         existing.expiryTime = result.expiryTimeMillis;
         recordGooglePlayPurchase(existing);
@@ -1905,30 +1970,49 @@ app.post('/api/billing/google-play/rtdn', async (req, res) => {
     return res.status(400).json({ error: 'Malformed notification data.' });
   }
 
-  // 1. Test notification handling
+  // 1. Persistent message deduplication
+  const rawMsgId = message.messageId || `msg_${notificationData.eventTimeMillis || Date.now()}_${notificationData.subscriptionNotification?.purchaseToken || 'gen'}`;
+  const messageId = String(rawMsgId).trim();
+
+  if (await hasProcessedRtdnEvent(messageId)) {
+    return res.status(200).json({ success: true, duplicate: true });
+  }
+
+  // 2. Test notification handling
   if (notificationData.testNotification) {
-    console.log('[RTDN] Processed Google Play test notification');
+    await recordRtdnEvent(messageId, Date.now());
     return res.status(200).json({ success: true, test: true });
   }
 
-  // 2. Package verification
+  // 3. Package verification
   if (notificationData.packageName && notificationData.packageName !== PLAY_PACKAGE_NAME) {
     console.warn(`[RTDN] Ignoring notification for external package: ${notificationData.packageName}`);
+    await recordRtdnEvent(messageId, Date.now());
     return res.status(200).json({ success: true, ignored: true });
   }
 
-  // 3. Process Subscription Notification
+  // 4. Process Subscription Notification
   const subNotification = notificationData.subscriptionNotification;
   if (subNotification) {
     const { notificationType, purchaseToken, subscriptionId } = subNotification;
     if (!purchaseToken) {
+      await recordRtdnEvent(messageId, Date.now());
       return res.status(200).json({ success: true, ignored: true });
     }
 
     const cleanToken = String(purchaseToken).trim();
     const cleanSku = subscriptionId ? String(subscriptionId).trim() : '';
+    const eventTimeMillis = Number(notificationData.eventTimeMillis) || Date.now();
 
-    // Re-verify authoritative current state from Google Play Developer API
+    // Out-of-order delivery protection: do not process if an event with a newer timestamp was already processed
+    const lastEventTime = await getLastRtdnEventTime(cleanToken);
+    if (eventTimeMillis > 0 && lastEventTime > 0 && eventTimeMillis < lastEventTime) {
+      console.warn(`[RTDN] Ignoring out-of-order event for ${cleanToken} (eventTime: ${eventTimeMillis} < last: ${lastEventTime})`);
+      await recordRtdnEvent(messageId, eventTimeMillis, cleanToken, notificationType);
+      return res.status(200).json({ success: true, ignoredOutOfOrder: true });
+    }
+
+    // Re-verify authoritative current state from Google Play Subscriptions V2 API
     const verification = await verifySubscriptionWithGooglePlay(
       PLAY_PACKAGE_NAME,
       cleanSku || GOOGLE_PLAY_SKUS.MONTHLY,
@@ -1938,19 +2022,20 @@ app.post('/api/billing/google-play/rtdn', async (req, res) => {
     const existingRecord = findGooglePlayPurchaseByToken(cleanToken);
     const now = Date.now();
 
-    // 1: SUBSCRIPTION_RECOVERED, 2: SUBSCRIPTION_RENEWED, 3: SUBSCRIPTION_CANCELED,
-    // 4: SUBSCRIPTION_PURCHASED, 12: SUBSCRIPTION_REVOKED, 13: SUBSCRIPTION_EXPIRED
-    const isRevokedOrExpired =
-      notificationType === 12 ||
-      notificationType === 13 ||
-      !verification.valid ||
-      verification.status === 'EXPIRED' ||
-      verification.status === 'REVOKED' ||
-      verification.expiryTimeMillis <= now;
-
     if (existingRecord) {
-      if (isRevokedOrExpired) {
-        existingRecord.state = notificationType === 12 || verification.status === 'REVOKED' ? 'REVOKED' : 'EXPIRED';
+      if (verification.isProEntitled && verification.expiryTimeMillis > now) {
+        // Active / Renewed
+        existingRecord.state = verification.status === 'CANCELLED_ACTIVE' ? 'CANCELLED_ACTIVE' : 'VERIFIED';
+        existingRecord.expiryTime = verification.expiryTimeMillis;
+        existingRecord.orderId = verification.orderId || existingRecord.orderId;
+        existingRecord.sku = verification.subscriptionId || existingRecord.sku;
+        recordGooglePlayPurchase(existingRecord);
+
+        updateUserPlan(existingRecord.userId, 'pro', verification.expiryTimeMillis);
+        console.log(`[RTDN] User ${existingRecord.userId} Pro renewed until ${new Date(verification.expiryTimeMillis).toISOString()}`);
+      } else {
+        // Expired / Canceled / Revoked / On Hold / Paused
+        existingRecord.state = verification.status;
         if (verification.expiryTimeMillis) existingRecord.expiryTime = verification.expiryTimeMillis;
         recordGooglePlayPurchase(existingRecord);
 
@@ -1961,37 +2046,47 @@ app.post('/api/billing/google-play/rtdn', async (req, res) => {
         );
         if (!hasOtherActive) {
           updateUserPlan(existingRecord.userId, 'free');
-          console.log(`[RTDN] User ${existingRecord.userId} Pro status removed (notificationType: ${notificationType})`);
+          console.log(`[RTDN] User ${existingRecord.userId} Pro status removed (status: ${verification.status}, notificationType: ${notificationType})`);
         }
-      } else {
-        // Active / Renewed
-        existingRecord.state = 'VERIFIED';
-        existingRecord.expiryTime = verification.expiryTimeMillis;
-        existingRecord.orderId = verification.orderId || existingRecord.orderId;
-        existingRecord.sku = verification.subscriptionId || existingRecord.sku;
-        recordGooglePlayPurchase(existingRecord);
-
-        updateUserPlan(existingRecord.userId, 'pro', verification.expiryTimeMillis);
-        console.log(`[RTDN] User ${existingRecord.userId} Pro renewed until ${new Date(verification.expiryTimeMillis).toISOString()}`);
       }
     } else {
-      // Record unlinked verified purchase so user can claim it upon signing in
-      if (verification.valid && verification.expiryTimeMillis > now) {
-        const pendingRecord: GooglePlayPurchaseRecord = {
+      // Purchase not yet in app database: check if external account identity matches a registered user
+      const accountId = verification.obfuscatedExternalAccountId;
+      const accountUser = accountId ? getUserById(accountId) : null;
+
+      if (accountUser && verification.isProEntitled && verification.expiryTimeMillis > now) {
+        const newRecord: GooglePlayPurchaseRecord = {
           id: `gp_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
-          userId: 'pending',
+          userId: accountUser.id,
           purchaseToken: cleanToken,
           sku: verification.subscriptionId,
           orderId: verification.orderId,
           packageName: PLAY_PACKAGE_NAME,
           purchaseTime: verification.purchaseTimeMillis,
           expiryTime: verification.expiryTimeMillis,
-          state: 'VERIFIED',
+          state: verification.status === 'CANCELLED_ACTIVE' ? 'CANCELLED_ACTIVE' : 'VERIFIED',
           verifiedAt: now,
         };
-        recordGooglePlayPurchase(pendingRecord);
+        recordGooglePlayPurchase(newRecord);
+        updateUserPlan(accountUser.id, 'pro', verification.expiryTimeMillis);
+      } else {
+        // Save to pending purchases bound to obfuscatedExternalAccountId so only that account can claim it later
+        await savePendingPurchase({
+          purchaseToken: cleanToken,
+          obfuscatedExternalAccountId: accountId || undefined,
+          sku: verification.subscriptionId,
+          orderId: verification.orderId,
+          expiryTime: verification.expiryTimeMillis,
+          status: verification.status,
+          isProEntitled: verification.isProEntitled,
+          createdAt: now,
+        });
       }
     }
+
+    await recordRtdnEvent(messageId, eventTimeMillis, cleanToken, notificationType);
+  } else {
+    await recordRtdnEvent(messageId, Date.now());
   }
 
   res.status(200).json({ success: true, processed: true });

@@ -1,12 +1,25 @@
 // Real Server-to-Server Google Play Developer API (Android Publisher v3) Client
-// Verifies purchase tokens, enforces package names and SKUs, retrieves authoritative
-// expiry time from Google Play, and acknowledges purchases.
+// Uses purchases.subscriptionsv2.get for authoritative verification.
+// Verifies package name, subscription/product ID, purchase token, subscription state,
+// lineItems, expiry time, latest order ID, linkedPurchaseToken, and external account binding.
+// Automatically acknowledges unacknowledged subscriptions.
 
 import fs from 'node:fs';
 import { GoogleAuth, JWT } from 'google-auth-library';
 import { GOOGLE_PLAY_SKUS, isValidGooglePlaySku } from './store.ts';
 
 export const PLAY_PACKAGE_NAME = 'com.aidocumenthelper.app';
+
+export type GooglePlaySubscriptionStatus =
+  | 'ACTIVE'
+  | 'CANCELLED_ACTIVE'
+  | 'IN_GRACE_PERIOD'
+  | 'ON_HOLD'
+  | 'PAUSED'
+  | 'EXPIRED'
+  | 'REVOKED'
+  | 'PENDING'
+  | 'INVALID';
 
 export interface GooglePlaySubscriptionResult {
   valid: boolean;
@@ -16,12 +29,24 @@ export interface GooglePlaySubscriptionResult {
   purchaseTimeMillis: number;
   expiryTimeMillis: number;
   autoRenewing: boolean;
+  status: GooglePlaySubscriptionStatus;
+  isProEntitled?: boolean;
   paymentState?: number;
   acknowledgementState?: number;
   cancelReason?: number;
-  status: 'ACTIVE' | 'CANCELLED_ACTIVE' | 'EXPIRED' | 'REVOKED' | 'INVALID';
+  linkedPurchaseToken?: string;
+  obfuscatedExternalAccountId?: string;
   errorMessage?: string;
   rawResponse?: any;
+}
+
+export function computeIsProEntitled(
+  status: GooglePlaySubscriptionStatus,
+  expiryTimeMillis: number,
+  now: number = Date.now()
+): boolean {
+  if (expiryTimeMillis <= now) return false;
+  return status === 'ACTIVE' || status === 'IN_GRACE_PERIOD' || status === 'CANCELLED_ACTIVE';
 }
 
 export type GooglePlayVerifierFn = (
@@ -90,8 +115,8 @@ function getAuthClient() {
 }
 
 /**
- * Verifies a subscription purchase token with the Google Play Developer API.
- * Never trusts client-supplied timestamps or order IDs.
+ * Verifies a subscription purchase token with Google Play Subscriptions V2 API.
+ * Never trusts client-supplied timestamps, order IDs, or expiry.
  */
 export async function verifySubscriptionWithGooglePlay(
   packageName: string,
@@ -109,6 +134,7 @@ export async function verifySubscriptionWithGooglePlay(
       expiryTimeMillis: 0,
       autoRenewing: false,
       status: 'INVALID',
+      isProEntitled: false,
       errorMessage: `Invalid package name: "${packageName}". Expected "${PLAY_PACKAGE_NAME}".`,
     };
   }
@@ -124,6 +150,7 @@ export async function verifySubscriptionWithGooglePlay(
       expiryTimeMillis: 0,
       autoRenewing: false,
       status: 'INVALID',
+      isProEntitled: false,
       errorMessage: `Invalid or unrecognized subscription product: "${subscriptionId}".`,
     };
   }
@@ -140,13 +167,18 @@ export async function verifySubscriptionWithGooglePlay(
       expiryTimeMillis: 0,
       autoRenewing: false,
       status: 'INVALID',
+      isProEntitled: false,
       errorMessage: 'Purchase token cannot be empty.',
     };
   }
 
   // 4. If mock verifier is configured in-process, use it
   if (mockVerifier) {
-    return mockVerifier(packageName, subscriptionId, cleanToken);
+    const res = await mockVerifier(packageName, subscriptionId, cleanToken);
+    if (res.isProEntitled === undefined) {
+      res.isProEntitled = computeIsProEntitled(res.status, res.expiryTimeMillis);
+    }
+    return res;
   }
 
   // 4b. In test environment only: allow configuring mock responses via test file in DATA_DIR
@@ -158,7 +190,11 @@ export async function verifySubscriptionWithGooglePlay(
         try {
           const fileMocks = JSON.parse(fs.readFileSync(mockFile, 'utf8'));
           if (fileMocks[cleanToken]) {
-            return fileMocks[cleanToken];
+            const mock = fileMocks[cleanToken];
+            if (mock.isProEntitled === undefined) {
+              mock.isProEntitled = computeIsProEntitled(mock.status, mock.expiryTimeMillis);
+            }
+            return mock;
           }
         } catch {
           // ignore
@@ -167,14 +203,14 @@ export async function verifySubscriptionWithGooglePlay(
     }
   }
 
-  // 5. Query official Google Play Android Publisher v3 API
+  // 5. Query official Google Play Android Publisher v3 Subscriptions V2 API
   try {
     const auth = getAuthClient();
     const client = await auth.getClient();
 
     const url = `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${encodeURIComponent(
       packageName
-    )}/purchases/subscriptions/${encodeURIComponent(subscriptionId)}/tokens/${encodeURIComponent(cleanToken)}`;
+    )}/purchases/subscriptionsv2/tokens/${encodeURIComponent(cleanToken)}`;
 
     const res: any = await client.request({
       url,
@@ -192,85 +228,68 @@ export async function verifySubscriptionWithGooglePlay(
         expiryTimeMillis: 0,
         autoRenewing: false,
         status: 'INVALID',
+        isProEntitled: false,
         errorMessage: 'Empty response received from Google Play Developer API.',
       };
     }
 
-    const startTimeMillis = Number(data.startTimeMillis || Date.now());
-    const expiryTimeMillis = Number(data.expiryTimeMillis || 0);
-    const autoRenewing = Boolean(data.autoRenewing);
-    const paymentState = data.paymentState !== undefined ? Number(data.paymentState) : undefined;
-    const acknowledgementState = data.acknowledgementState !== undefined ? Number(data.acknowledgementState) : undefined;
-    const cancelReason = data.cancelReason !== undefined ? Number(data.cancelReason) : undefined;
-    const orderId = data.orderId || `GPA.PLAY-${cleanToken.slice(0, 8)}`;
+    // Parse Subscriptions V2 lineItems
+    const lineItem = Array.isArray(data.lineItems)
+      ? (data.lineItems.find((li: any) => li.productId === subscriptionId) || data.lineItems[0])
+      : null;
+
+    const productId = lineItem?.productId || subscriptionId;
+    const expiryTimeMillis = lineItem?.expiryTime
+      ? new Date(lineItem.expiryTime).getTime()
+      : (data.expiryTimeMillis ? Number(data.expiryTimeMillis) : 0);
+    const startTimeMillis = data.startTime
+      ? new Date(data.startTime).getTime()
+      : (data.startTimeMillis ? Number(data.startTimeMillis) : Date.now());
+    const autoRenewing = Boolean(lineItem?.autoRenewingPlan?.autoRenewEnabled ?? data.autoRenewing);
+    const orderId = data.latestOrderId || data.orderId || `GPA.PLAY-${cleanToken.slice(0, 8)}`;
+    const linkedPurchaseToken = data.linkedPurchaseToken ? String(data.linkedPurchaseToken).trim() : undefined;
+    const obfuscatedExternalAccountId =
+      data.externalAccountIdentifiers?.obfuscatedExternalAccountId
+        ? String(data.externalAccountIdentifiers.obfuscatedExternalAccountId).trim()
+        : undefined;
+
+    // Subscription V2 state mapping
+    const rawState = data.subscriptionState;
+    let status: GooglePlaySubscriptionStatus = 'ACTIVE';
+
+    if (rawState === 1 || rawState === 'SUBSCRIPTION_STATE_PENDING') {
+      status = 'PENDING';
+    } else if (rawState === 3 || rawState === 'SUBSCRIPTION_STATE_PAUSED') {
+      status = 'PAUSED';
+    } else if (rawState === 4 || rawState === 'SUBSCRIPTION_STATE_IN_GRACE_PERIOD') {
+      status = 'IN_GRACE_PERIOD';
+    } else if (rawState === 5 || rawState === 'SUBSCRIPTION_STATE_ON_HOLD') {
+      status = 'ON_HOLD';
+    } else if (rawState === 6 || rawState === 'SUBSCRIPTION_STATE_CANCELED') {
+      status = 'CANCELLED_ACTIVE';
+    } else if (rawState === 7 || rawState === 'SUBSCRIPTION_STATE_EXPIRED') {
+      status = 'EXPIRED';
+    } else if (rawState === 2 || rawState === 'SUBSCRIPTION_STATE_ACTIVE') {
+      status = 'ACTIVE';
+    } else if (data.status) {
+      status = data.status;
+    }
 
     const now = Date.now();
-
-    // Check expiry
-    if (expiryTimeMillis <= now) {
-      return {
-        valid: false,
-        packageName,
-        subscriptionId,
-        orderId,
-        purchaseTimeMillis: startTimeMillis,
-        expiryTimeMillis,
-        autoRenewing,
-        paymentState,
-        acknowledgementState,
-        cancelReason,
-        status: 'EXPIRED',
-        errorMessage: 'Subscription has expired according to Google Play records.',
-        rawResponse: data,
-      };
+    if (expiryTimeMillis > 0 && expiryTimeMillis <= now) {
+      status = 'EXPIRED';
     }
 
-    // Check cancellation / revocation
-    // cancelReason 3: Developer canceled / refunded
-    // cancelReason 1: System canceled
-    if (cancelReason === 3) {
-      return {
-        valid: false,
-        packageName,
-        subscriptionId,
-        orderId,
-        purchaseTimeMillis: startTimeMillis,
-        expiryTimeMillis,
-        autoRenewing,
-        paymentState,
-        acknowledgementState,
-        cancelReason,
-        status: 'REVOKED',
-        errorMessage: 'Subscription has been refunded or revoked.',
-        rawResponse: data,
-      };
-    }
+    const isProEntitled = computeIsProEntitled(status, expiryTimeMillis, now);
 
-    // Check payment pending
-    if (paymentState === 0) {
-      return {
-        valid: false,
-        packageName,
-        subscriptionId,
-        orderId,
-        purchaseTimeMillis: startTimeMillis,
-        expiryTimeMillis,
-        autoRenewing,
-        paymentState,
-        acknowledgementState,
-        cancelReason,
-        status: 'INVALID',
-        errorMessage: 'Payment is pending with Google Play.',
-        rawResponse: data,
-      };
-    }
-
-    // Auto-acknowledge unacknowledged subscription if payment was received
-    if (acknowledgementState === 0) {
+    // Auto-acknowledge unacknowledged subscription if currently active/entitled
+    const ackState = data.acknowledgementState;
+    const needsAck = ackState === 1 || ackState === 'ACKNOWLEDGEMENT_STATE_PENDING' || ackState === 0;
+    if (needsAck && isProEntitled) {
       try {
         const ackUrl = `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${encodeURIComponent(
           packageName
-        )}/purchases/subscriptions/${encodeURIComponent(subscriptionId)}/tokens/${encodeURIComponent(cleanToken)}:acknowledge`;
+        )}/purchases/subscriptions/${encodeURIComponent(productId)}/tokens/${encodeURIComponent(cleanToken)}:acknowledge`;
         await client.request({
           url: ackUrl,
           method: 'POST',
@@ -281,20 +300,18 @@ export async function verifySubscriptionWithGooglePlay(
       }
     }
 
-    const status = cancelReason === 0 ? 'CANCELLED_ACTIVE' : 'ACTIVE';
-
     return {
-      valid: true,
+      valid: isProEntitled || status === 'CANCELLED_ACTIVE' || status === 'IN_GRACE_PERIOD',
       packageName,
-      subscriptionId,
+      subscriptionId: productId,
       orderId,
       purchaseTimeMillis: startTimeMillis,
       expiryTimeMillis,
       autoRenewing,
-      paymentState,
-      acknowledgementState: 1,
-      cancelReason,
       status,
+      isProEntitled,
+      linkedPurchaseToken,
+      obfuscatedExternalAccountId,
       rawResponse: data,
     };
   } catch (err: any) {
@@ -310,6 +327,7 @@ export async function verifySubscriptionWithGooglePlay(
         expiryTimeMillis: 0,
         autoRenewing: false,
         status: 'INVALID',
+        isProEntitled: false,
         errorMessage: 'Purchase token was not found or is invalid with Google Play.',
       };
     }
@@ -324,7 +342,9 @@ export async function verifySubscriptionWithGooglePlay(
       expiryTimeMillis: 0,
       autoRenewing: false,
       status: 'INVALID',
+      isProEntitled: false,
       errorMessage: 'Failed to verify subscription with Google Play Developer API.',
     };
   }
 }
+

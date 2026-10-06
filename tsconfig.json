@@ -24,12 +24,14 @@
     "noEmit": true
   },
   "include": [
-    "src"
+    "src",
+    "server.ts",
+    "server/**/*.ts",
+    "tests/**/*.ts"
   ],
   "exclude": [
     "node_modules",
     "dist",
-    "android",
-    "tests"
+    "android"
   ]
 }

@@ -6,6 +6,7 @@ import path from 'node:path';
 import net from 'node:net';
 import pg from 'pg';
 import { startTestServer, api, registerUser, freePort, type TestServer } from './helpers.ts';
+import { PostgresStore } from '../server/db.ts';
 
 const BASE_URL = process.env.TEST_DATABASE_URL || '';
 const skip = !BASE_URL ? 'TEST_DATABASE_URL not set (PostgreSQL not available)' : false;

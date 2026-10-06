@@ -20,6 +20,20 @@ export interface StoredUser {
   preferredLanguage?: string;
 }
 
+export type PurchaseRecordState =
+  | 'VERIFIED'
+  | 'ACTIVE'
+  | 'CANCELLED_ACTIVE'
+  | 'IN_GRACE_PERIOD'
+  | 'ON_HOLD'
+  | 'PAUSED'
+  | 'EXPIRED'
+  | 'REVOKED'
+  | 'REPLACED'
+  | 'PENDING'
+  | 'INVALID'
+  | 'CANCELLED';
+
 export interface GooglePlayPurchaseRecord {
   id: string;
   userId: string;
@@ -29,8 +43,9 @@ export interface GooglePlayPurchaseRecord {
   packageName?: string;
   purchaseTime: number;
   expiryTime?: number;
-  state: 'VERIFIED' | 'EXPIRED' | 'CANCELLED';
+  state: PurchaseRecordState;
   verifiedAt: number;
+  linkedPurchaseToken?: string;
 }
 
 export interface StoredDocument {
@@ -98,6 +113,8 @@ let sessions: StoredSession[] = [];
 let documents: StoredDocument[] = [];
 let usageMap: Record<string, number> = {};
 let purchases: GooglePlayPurchaseRecord[] = [];
+let rtdnEvents: Record<string, { eventTimeMillis: number; purchaseToken?: string; notificationType?: number; processedAt: number }> = {};
+let pendingPurchases: Record<string, any> = {};
 
 // App owner & admin email
 export const OWNER_EMAIL = (process.env.OWNER_EMAIL || 'aadeshv825@gmail.com').toLowerCase();
@@ -147,7 +164,7 @@ export async function initStore(): Promise<void> {
   if (dbUrl) {
     try {
       pgStore = new PostgresStore(dbUrl);
-      await pgStore.connectAndMigrate();
+      await pgStore.migrate();
       const loaded = await pgStore.loadAll();
       users = loaded.users || [];
       sessions = loaded.sessions || [];
@@ -180,6 +197,8 @@ export async function initStore(): Promise<void> {
   documents = readJsonFile<StoredDocument[]>(getFilePath('documents.json'), []);
   usageMap = readJsonFile<Record<string, number>>(getFilePath('usage.json'), {});
   purchases = readJsonFile<GooglePlayPurchaseRecord[]>(getFilePath('purchases.json'), []);
+  rtdnEvents = readJsonFile<Record<string, any>>(getFilePath('rtdn-events.json'), {});
+  pendingPurchases = readJsonFile<Record<string, any>>(getFilePath('pending-purchases.json'), {});
 
   // Ensure owner user exists in local dev mode
   const ADMIN_INITIAL_PASSWORD = process.env.ADMIN_INITIAL_PASSWORD;
@@ -722,3 +741,78 @@ export async function confirmPersisted(mark: number): Promise<boolean> {
   }
   return true;
 }
+
+export async function hasProcessedRtdnEvent(eventId: string): Promise<boolean> {
+  if (pgStore) {
+    return pgStore.hasProcessedRtdnEvent(eventId);
+  }
+  return Boolean(rtdnEvents[eventId]);
+}
+
+export async function recordRtdnEvent(
+  eventId: string,
+  eventTimeMillis: number,
+  purchaseToken?: string,
+  notificationType?: number
+): Promise<void> {
+  if (pgStore) {
+    pgStore.recordRtdnEvent(eventId, eventTimeMillis, purchaseToken, notificationType);
+  }
+  rtdnEvents[eventId] = {
+    eventTimeMillis,
+    purchaseToken,
+    notificationType,
+    processedAt: Date.now(),
+  };
+  writeJsonFile(getFilePath('rtdn-events.json'), rtdnEvents);
+}
+
+export async function getLastRtdnEventTime(purchaseToken: string): Promise<number> {
+  if (pgStore) {
+    return pgStore.getLastRtdnEventTime(purchaseToken);
+  }
+  let maxTime = 0;
+  for (const ev of Object.values(rtdnEvents)) {
+    if (ev.purchaseToken === purchaseToken && ev.eventTimeMillis > maxTime) {
+      maxTime = ev.eventTimeMillis;
+    }
+  }
+  return maxTime;
+}
+
+export async function savePendingPurchase(record: any): Promise<void> {
+  if (pgStore) {
+    pgStore.upsertPendingPurchase(record);
+  }
+  pendingPurchases[record.purchaseToken] = record;
+  writeJsonFile(getFilePath('pending-purchases.json'), pendingPurchases);
+}
+
+export async function getPendingPurchase(purchaseToken: string): Promise<any | null> {
+  if (pgStore) {
+    return pgStore.getPendingPurchase(purchaseToken);
+  }
+  return pendingPurchases[purchaseToken] || null;
+}
+
+export async function deletePendingPurchase(purchaseToken: string): Promise<void> {
+  if (pgStore) {
+    pgStore.deletePendingPurchase(purchaseToken);
+  }
+  delete pendingPurchases[purchaseToken];
+  writeJsonFile(getFilePath('pending-purchases.json'), pendingPurchases);
+}
+
+export async function checkDatabaseReadiness(): Promise<{ ready: boolean; configured: boolean; error?: string }> {
+  const dbUrl = (process.env.DATABASE_URL || '').trim();
+  const requireDb = process.env.REQUIRE_DATABASE === 'true';
+  if (!dbUrl) {
+    return { ready: !requireDb, configured: false };
+  }
+  if (!pgStore) {
+    return { ready: false, configured: true, error: 'Database store not initialized' };
+  }
+  const isAlive = await pgStore.ping();
+  return { ready: isAlive, configured: true, error: isAlive ? undefined : 'PostgreSQL ping failed' };
+}
+

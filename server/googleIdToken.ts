@@ -67,8 +67,8 @@ export type GoogleIdTokenVerifyFn = (
 ) => Promise<Record<string, any> | undefined>;
 
 export type GoogleIdTokenCheck =
-  | { ok: true; payload: Record<string, any> }
-  | { ok: false; status: number; error: string };
+  | { ok: true; payload: Record<string, any>; status?: undefined; error?: undefined }
+  | { ok: false; status: number; error: string; payload?: undefined };
 
 /**
  * Verifies a Google ID token: signature (Google public keys), issuer,

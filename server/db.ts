@@ -104,6 +104,30 @@ const MIGRATIONS: Migration[] = [
       )`,
     ],
   },
+  {
+    version: 2,
+    name: 'rtdn_and_pending_purchases',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS app_rtdn_events (
+        event_id TEXT PRIMARY KEY,
+        event_time_millis BIGINT NOT NULL,
+        purchase_token TEXT,
+        notification_type INTEGER,
+        processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS app_rtdn_events_token_idx
+        ON app_rtdn_events (purchase_token)`,
+      `CREATE TABLE IF NOT EXISTS app_pending_purchases (
+        purchase_token TEXT PRIMARY KEY,
+        obfuscated_external_account_id TEXT,
+        data JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS app_pending_purchases_account_idx
+        ON app_pending_purchases (obfuscated_external_account_id)`,
+    ],
+  },
 ];
 
 // Arbitrary constant used to serialise migrations across instances.
@@ -176,6 +200,10 @@ export class PostgresStore {
         err.message
       );
     });
+  }
+
+  async connectAndMigrate(): Promise<void> {
+    await this.migrate();
   }
 
   async migrate(): Promise<void> {
@@ -700,6 +728,10 @@ export class PostgresStore {
     );
   }
 
+  upsertSession(session: PersistedSession): void {
+    this.insertSession(session);
+  }
+
   deleteSession(tokenHash: string): void {
     this.enqueue(
       'delete session',
@@ -794,6 +826,71 @@ export class PostgresStore {
         record.userId,
         JSON.stringify(record),
       ]
+    );
+  }
+
+  async hasProcessedRtdnEvent(eventId: string): Promise<boolean> {
+    const res = await this.pool.query(
+      'SELECT 1 FROM app_rtdn_events WHERE event_id = $1 LIMIT 1',
+      [eventId]
+    );
+    return (res.rowCount ?? 0) > 0;
+  }
+
+  recordRtdnEvent(
+    eventId: string,
+    eventTimeMillis: number,
+    purchaseToken?: string,
+    notificationType?: number
+  ): void {
+    this.enqueue(
+      `record rtdn event ${eventId}`,
+      `INSERT INTO app_rtdn_events (event_id, event_time_millis, purchase_token, notification_type)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (event_id) DO NOTHING`,
+      [eventId, eventTimeMillis, purchaseToken || null, notificationType ?? null]
+    );
+  }
+
+  async getLastRtdnEventTime(purchaseToken: string): Promise<number> {
+    const res = await this.pool.query(
+      'SELECT max(event_time_millis) AS max_time FROM app_rtdn_events WHERE purchase_token = $1',
+      [purchaseToken]
+    );
+    return res.rows[0]?.max_time ? Number(res.rows[0].max_time) : 0;
+  }
+
+  upsertPendingPurchase(record: any): void {
+    this.enqueue(
+      `upsert pending purchase ${record.purchaseToken}`,
+      `INSERT INTO app_pending_purchases (purchase_token, obfuscated_external_account_id, data, updated_at)
+       VALUES ($1, $2, $3, now())
+       ON CONFLICT (purchase_token) DO UPDATE
+         SET obfuscated_external_account_id = EXCLUDED.obfuscated_external_account_id,
+             data = EXCLUDED.data,
+             updated_at = now()`,
+      [
+        record.purchaseToken,
+        record.obfuscatedExternalAccountId || null,
+        JSON.stringify(record),
+      ]
+    );
+  }
+
+  async getPendingPurchase(purchaseToken: string): Promise<any | null> {
+    const res = await this.pool.query(
+      'SELECT data FROM app_pending_purchases WHERE purchase_token = $1',
+      [purchaseToken]
+    );
+    if (!res.rows.length) return null;
+    return typeof res.rows[0].data === 'string' ? JSON.parse(res.rows[0].data) : res.rows[0].data;
+  }
+
+  deletePendingPurchase(purchaseToken: string): void {
+    this.enqueue(
+      `delete pending purchase ${purchaseToken}`,
+      'DELETE FROM app_pending_purchases WHERE purchase_token = $1',
+      [purchaseToken]
     );
   }
 }
