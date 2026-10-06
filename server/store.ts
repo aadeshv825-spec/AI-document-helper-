@@ -29,8 +29,27 @@ export interface GooglePlayPurchaseRecord {
   packageName?: string;
   purchaseTime: number;
   expiryTime?: number;
-  state: 'VERIFIED' | 'EXPIRED' | 'CANCELLED';
+  state:
+    | 'VERIFIED'
+    | 'ACTIVE'
+    | 'CANCELED'
+    | 'EXPIRED'
+    | 'PAUSED'
+    | 'IN_GRACE_PERIOD'
+    | 'ON_HOLD'
+    | 'PENDING'
+    | 'PENDING_PURCHASE_CANCELED'
+    | 'REVOKED'
+    | 'INVALID';
   verifiedAt: number;
+  linkedPurchaseToken?: string;
+  obfuscatedExternalAccountId?: string;
+  latestSuccessfulOrderId?: string;
+}
+
+interface ProcessedRtdnEvent {
+  messageId: string;
+  processedAt: number;
 }
 
 export interface StoredDocument {
@@ -98,6 +117,7 @@ let sessions: StoredSession[] = [];
 let documents: StoredDocument[] = [];
 let usageMap: Record<string, number> = {};
 let purchases: GooglePlayPurchaseRecord[] = [];
+let processedRtdnEvents: ProcessedRtdnEvent[] = [];
 
 // App owner & admin email
 export const OWNER_EMAIL = (process.env.OWNER_EMAIL || 'aadeshv825@gmail.com').toLowerCase();

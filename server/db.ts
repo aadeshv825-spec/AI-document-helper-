@@ -28,6 +28,7 @@ export interface LoadedData {
   documents: any[];
   usage: Record<string, number>;
   purchases: any[];
+  rtdnEvents: any[];
 }
 
 export interface JsonImportInput {
@@ -101,6 +102,17 @@ const MIGRATIONS: Migration[] = [
         imported_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         inserted JSONB NOT NULL,
         skipped JSONB NOT NULL
+      )`,
+    ],
+  },
+  {
+    version: 2,
+    name: 'rtdn_idempotency',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS app_rtdn_events (
+        message_id TEXT PRIMARY KEY,
+        data JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
       )`,
     ],
   },
@@ -178,6 +190,10 @@ export class PostgresStore {
     });
   }
 
+  async connectAndMigrate(): Promise<void> {
+    await this.migrate();
+  }
+
   async migrate(): Promise<void> {
     const client =
       await this.pool.connect();
@@ -247,6 +263,7 @@ export class PostgresStore {
       documentsRes,
       usageRes,
       purchasesRes,
+      rtdnEventsRes,
     ] = await Promise.all([
       this.pool.query(
         'SELECT data FROM app_users ORDER BY created_at ASC'
@@ -262,6 +279,9 @@ export class PostgresStore {
       ),
       this.pool.query(
         'SELECT data FROM app_purchases'
+      ),
+      this.pool.query(
+        'SELECT data FROM app_rtdn_events'
       ),
     ]);
 
@@ -282,6 +302,7 @@ export class PostgresStore {
       documents: documentsRes.rows.map((r: any) => r.data),
       usage,
       purchases: purchasesRes.rows.map((r: any) => r.data),
+      rtdnEvents: rtdnEventsRes.rows.map((r: any) => r.data),
     };
   }
 
@@ -700,6 +721,10 @@ export class PostgresStore {
     );
   }
 
+  upsertSession(session: PersistedSession): void {
+    this.insertSession(session);
+  }
+
   deleteSession(tokenHash: string): void {
     this.enqueue(
       'delete session',
@@ -792,6 +817,19 @@ export class PostgresStore {
         record.purchaseToken,
         record.id,
         record.userId,
+        JSON.stringify(record),
+      ]
+    );
+  }
+
+  upsertRtdnEvent(record: any): void {
+    this.enqueue(
+      `upsert rtdn event ${record.messageId}`,
+      `INSERT INTO app_rtdn_events (message_id, data, created_at)
+       VALUES ($1, $2, now())
+       ON CONFLICT (message_id) DO NOTHING`,
+      [
+        record.messageId,
         JSON.stringify(record),
       ]
     );
