@@ -153,16 +153,20 @@ class PlayBillingManager(
             }
 
             activity.runOnUiThread {
-                val script = """
-                    (function() {
-                        var purchases = ${resultJson.toString()};
-                        if (window.onGooglePlayPurchasesRestored) {
-                            window.onGooglePlayPurchasesRestored(purchases);
-                        }
-                        window.dispatchEvent(new CustomEvent('onGooglePlayPurchasesRestored', { detail: purchases }));
-                    })();
-                """.trimIndent()
-                webView.evaluateJavascript(script, null)
+                if (MainActivity.isTrustedAppUrl(webView.url)) {
+                    val script = """
+                        (function() {
+                            var purchases = ${resultJson.toString()};
+                            if (window.onGooglePlayPurchasesRestored) {
+                                window.onGooglePlayPurchasesRestored(purchases);
+                            }
+                            window.dispatchEvent(new CustomEvent('onGooglePlayPurchasesRestored', { detail: purchases }));
+                        })();
+                    """.trimIndent()
+                    webView.evaluateJavascript(script, null)
+                } else {
+                    Log.w(tag, "Refusing to dispatch purchases to untrusted page")
+                }
             }
         }
 
@@ -203,8 +207,12 @@ class PlayBillingManager(
             }
 
             activity.runOnUiThread {
-                val script = "if (window.onGooglePlayPurchaseCompleted) { window.onGooglePlayPurchaseCompleted($payload); }"
-                webView.evaluateJavascript(script, null)
+                if (MainActivity.isTrustedAppUrl(webView.url)) {
+                    val script = "if (window.onGooglePlayPurchaseCompleted) { window.onGooglePlayPurchaseCompleted($payload); }"
+                    webView.evaluateJavascript(script, null)
+                } else {
+                    Log.w(tag, "Refusing to dispatch purchase completion to untrusted page")
+                }
             }
         }
     }

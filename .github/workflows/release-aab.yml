@@ -32,10 +32,10 @@ jobs:
       - name: Validate release inputs
         run: |
           if ! [[ "$VERSION_CODE" =~ ^[0-9]+$ ]] || [ "$VERSION_CODE" -le 7 ]; then
-            echo "ERROR: version_code must be a whole number greater than 7 (the highest versionCode in this repository's history)."
+            echo "ERROR: version_code must be a whole number greater than all versions uploaded to Google Play Console (minimum 8 for this release cycle)."
             exit 1
           fi
-          echo "Note: Verified version_code ($VERSION_CODE) is greater than repository baseline (7). Verify in Google Play Console that this exceeds all released track versions."
+          echo "Note: Verified version_code ($VERSION_CODE) meets minimum release requirement (>= 8). Ensure this exceeds all active and draft releases in Google Play Console."
           if ! [[ "$VERSION_NAME" =~ ^[0-9A-Za-z.+-]{1,32}$ ]]; then
             echo "ERROR: version_name is invalid."
             exit 1
