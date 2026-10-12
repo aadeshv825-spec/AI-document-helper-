@@ -23,7 +23,7 @@ function withDatabase(url: string, name: string): string {
 before(async () => {
   if (skip) return;
   dbName = `adh_test_${Date.now()}`;
-  const admin = new pg.Client({ connectionString: BASE_URL });
+  const admin = new pg.Client({ connectionString: BASE_URL, connectionTimeoutMillis: 15000 });
   await admin.connect();
   await admin.query(`CREATE DATABASE ${dbName}`);
   await admin.end();
@@ -32,7 +32,7 @@ before(async () => {
 
 after(async () => {
   if (skip || !dbName) return;
-  const admin = new pg.Client({ connectionString: BASE_URL });
+  const admin = new pg.Client({ connectionString: BASE_URL, connectionTimeoutMillis: 15000 });
   await admin.connect();
   await admin.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);
   await admin.end();

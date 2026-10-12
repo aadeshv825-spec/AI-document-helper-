@@ -2130,7 +2130,15 @@ async function startServer() {
   });
 
   const shutdown = () => {
+    if (typeof server.closeAllConnections === 'function') {
+      server.closeAllConnections();
+    }
+    const forced = setTimeout(() => {
+      console.error('[Server] Forced shutdown after 5s');
+      process.exit(0);
+    }, 5000).unref?.();
     server.close(() => {
+      if (forced) clearTimeout(forced);
       process.exit(0);
     });
   };
