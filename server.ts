@@ -40,6 +40,10 @@ import {
   recordGooglePlayPurchase,
   getUserGooglePlayPurchases,
   checkDatabaseReadiness,
+  getStorageStatus,
+  closeStore,
+  getWriteMark,
+  confirmPersisted,
   hasProcessedRtdnEvent,
   recordRtdnEvent,
   getLastRtdnEventTime,
@@ -190,9 +194,11 @@ function getAIClient(): GoogleGenAI {
 app.get('/api/health', (req, res) => {
   const key = process.env.GEMINI_API_KEY;
   const isConfigured = Boolean(key && key !== 'MY_GEMINI_API_KEY');
+  const storage = getStorageStatus();
   res.json({
     status: 'ok',
     hasGeminiKey: isConfigured,
+    storage,
   });
 });
 
@@ -1873,7 +1879,7 @@ app.get('/api/documents', (req, res) => {
   res.json({ documents: docs });
 });
 
-app.post('/api/documents', (req, res) => {
+app.post('/api/documents', async (req, res) => {
   const { user } = getAuthContext(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized.' });
 
@@ -1881,6 +1887,7 @@ app.post('/api/documents', (req, res) => {
     const { id, title, type, snippet, fullContent, isFavorite, category, timestamp } = req.body;
     if (!fullContent) return res.status(400).json({ error: 'Document content is required.' });
 
+    const mark = getWriteMark();
     const doc = saveUserDocument(user.id, {
       id,
       title,
@@ -1891,42 +1898,77 @@ app.post('/api/documents', (req, res) => {
       category,
       timestamp,
     });
+
+    const persisted = await confirmPersisted(mark, 2500);
+    if (!persisted) {
+      return res.status(503).json({
+        error: 'Storage unavailable; document saved to cache and queued for persistence once database recovers.',
+        persistenceFailed: true,
+        document: doc,
+      });
+    }
+
     res.json({ document: doc });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to save document.' });
   }
 });
 
-app.put('/api/documents/:id', (req, res) => {
+app.put('/api/documents/:id', async (req, res) => {
   const { user } = getAuthContext(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized.' });
 
   try {
     const { title, isFavorite, category } = req.body;
+    const mark = getWriteMark();
     const doc = updateUserDocument(user.id, req.params.id, { title, isFavorite, category });
+    const persisted = await confirmPersisted(mark, 2500);
+    if (!persisted) {
+      return res.status(503).json({
+        error: 'Storage unavailable; document update queued for persistence once database recovers.',
+        persistenceFailed: true,
+        document: doc,
+      });
+    }
     res.json({ document: doc });
   } catch (err: any) {
     res.status(404).json({ error: err.message || 'Document not found.' });
   }
 });
 
-app.delete('/api/documents/:id', (req, res) => {
+app.delete('/api/documents/:id', async (req, res) => {
   const { user } = getAuthContext(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized.' });
 
+  const mark = getWriteMark();
   deleteUserDocument(user.id, req.params.id);
+  const persisted = await confirmPersisted(mark, 2500);
+  if (!persisted) {
+    return res.status(503).json({
+      error: 'Storage unavailable; document deletion queued for persistence once database recovers.',
+      persistenceFailed: true,
+    });
+  }
   res.json({ status: 'ok' });
 });
 
-app.delete('/api/documents', (req, res) => {
+app.delete('/api/documents', async (req, res) => {
   const { user } = getAuthContext(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized.' });
 
+  const mark = getWriteMark();
   clearUserDocuments(user.id);
+  const persisted = await confirmPersisted(mark, 2500);
+  if (!persisted) {
+    return res.status(503).json({
+      error: 'Storage unavailable; clearing documents queued for persistence once database recovers.',
+      persistenceFailed: true,
+    });
+  }
   res.json({ status: 'ok' });
 });
 
-app.post('/api/documents/sync', (req, res) => {
+app.post('/api/documents/sync', async (req, res) => {
   const { user } = getAuthContext(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized.' });
 
@@ -1935,7 +1977,16 @@ app.post('/api/documents/sync', (req, res) => {
     return res.status(400).json({ error: 'Invalid document payload.' });
   }
 
+  const mark = getWriteMark();
   const synced = syncUserDocuments(user.id, clientDocs);
+  const persisted = await confirmPersisted(mark, 2500);
+  if (!persisted) {
+    return res.status(503).json({
+      error: 'Storage unavailable; documents synced to cache and queued for persistence once database recovers.',
+      persistenceFailed: true,
+      documents: synced,
+    });
+  }
   res.json({ documents: synced });
 });
 
@@ -2129,13 +2180,65 @@ async function startServer() {
     console.log(`Document Helper server running at http://0.0.0.0:${PORT}`);
   });
 
-  const shutdown = () => {
-    server.close(() => {
+  let isShuttingDown = false;
+
+  // Inform clients that connection should not be reused once shutting down
+  app.use((req, res, next) => {
+    if (isShuttingDown) {
+      res.setHeader('Connection', 'close');
+    }
+    next();
+  });
+
+  const shutdown = async (signal = 'SIGTERM') => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    console.log(`[Server] Graceful shutdown initiated (${signal})...`);
+
+    // Safety timeout: bounded maximum time for entire shutdown process
+    const forceExitTimer = setTimeout(async () => {
+      console.warn('[Server] Graceful shutdown deadline exceeded; forcing storage closure...');
+      try {
+        await closeStore(3000);
+      } catch (err) {
+        console.error('[Server] Error during forced store closure:', err);
+      }
+      const st = getStorageStatus();
+      if (st.failedWrites > 0 || st.pendingWrites > 0) {
+        console.error(`[Server] Exiting with unpersisted writes (pending: ${st.pendingWrites}, failed: ${st.failedWrites})`);
+        process.exit(1);
+      }
+      process.exit(0);
+    }, 12000);
+    forceExitTimer.unref();
+
+    // Close idle keep-alive connections so server.close() doesn't hang on idle sockets
+    if (typeof (server as any).closeIdleConnections === 'function') {
+      (server as any).closeIdleConnections();
+    }
+
+    server.close(async (err) => {
+      if (err) {
+        console.error('[Server] Error closing HTTP server listener:', err);
+      }
+      try {
+        // Bounded flush of pending database writes
+        await closeStore(8000);
+      } catch (closeErr) {
+        console.error('[Server] Error closing storage during shutdown:', closeErr);
+      }
+      clearTimeout(forceExitTimer);
+      const st = getStorageStatus();
+      if (st.failedWrites > 0 || st.pendingWrites > 0) {
+        console.error(`[Server] Graceful shutdown finished with unpersisted writes (pending: ${st.pendingWrites}, failed: ${st.failedWrites})`);
+        process.exit(1);
+      }
       process.exit(0);
     });
   };
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+
+  process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
+  process.on('SIGINT', () => { void shutdown('SIGINT'); });
 
   server.on('error', (err: any) => {
     if (err && err.code === 'EADDRINUSE' && PORT !== 3000) {

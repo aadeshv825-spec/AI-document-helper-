@@ -72,6 +72,30 @@ test('write confirmation reports JSON storage success', async () => {
   const mark = store.getWriteMark();
   store.registerUser('C', `c${Date.now()}@example.com`, 'pass-cccc-1');
   assert.equal(await store.confirmPersisted(mark), true);
+
+  const docRes = await store.saveUserDocumentWithConfirmation('u_test_conf', {
+    title: 'Confirmed Doc',
+    type: 'ai-writer',
+    fullContent: 'Content for confirmed doc',
+  });
+  assert.equal(docRes.persisted, true);
+  assert.equal(docRes.document.title, 'Confirmed Doc');
+
+  const syncRes = await store.syncUserDocumentsWithConfirmation('u_test_conf', [
+    {
+      id: 'sync_conf_1',
+      title: 'Synced Confirmed',
+      type: 'scanner',
+      snippet: 'snip',
+      fullContent: 'Sync conf content',
+      timestamp: Date.now(),
+    },
+  ]);
+  assert.equal(syncRes.persisted, true);
+  assert.ok(syncRes.documents.some((d) => d.id === 'sync_conf_1'));
+
+  const status = store.getStorageStatus();
+  assert.equal(typeof status.connected, 'boolean');
 });
 
 test('expired Pro subscription becomes Free and isUserPro returns false', () => {

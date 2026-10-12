@@ -119,8 +119,8 @@ test('legacy JSON import is idempotent and never overwrites database rows', { sk
   assert.equal(users.rows[0].n, 1);
   const docs = await query('SELECT count(*)::int AS n FROM app_documents WHERE user_id = $1', [legacyUsers[0].id]);
   assert.equal(docs.rows[0].n, 1);
-  const imports = await query('SELECT count(*)::int AS n FROM app_json_imports');
-  assert.equal(imports.rows[0].n, 1, 'each source imported once');
+  const imports = await query('SELECT count(*)::int AS n FROM app_json_imports WHERE source = $1', [path.resolve(dataDir)]);
+  assert.equal(imports.rows[0].n, 1, 'each source imported exactly once without duplicate records');
 
   // JSON files are left untouched (backup preserved).
   assert.ok(fs.existsSync(path.join(dataDir, 'users.json')));
@@ -177,24 +177,34 @@ test('database outage: saves are not reported as successful; queued writes apply
     assert.equal(during.status, 503, 'must not claim success while the database is down');
     assert.equal(during.data.persistenceFailed, true);
 
+    const duringSync = await api(server, 'POST', '/api/documents/sync', { documents: [{ id: 'sync_outage_1', title: 'Sync Outage', type: 'scanner', snippet: 'outage', fullContent: 'outage-sync-content-888', timestamp: Date.now() }] }, u.token);
+    assert.equal(duringSync.status, 503, 'sync must not claim success while the database is down');
+    assert.equal(duringSync.data.persistenceFailed, true);
+
     const health = await api(server, 'GET', '/api/health');
     assert.equal(health.data.storage.connected, false);
     assert.equal((await api(server, 'GET', '/api/health/ready')).status, 503);
 
     proxy.setDown(false);
 
-    // Wait for the queued write to be applied.
+    // Wait for the queued writes to be applied.
     const deadline = Date.now() + 20000;
     let applied = false;
+    let syncApplied = false;
     while (Date.now() < deadline) {
-      const r = await query("SELECT 1 FROM app_documents WHERE user_id = $1 AND data->>'fullContent' = 'outage-content-777'", [u.user.id]);
-      if (r.rowCount) {
-        applied = true;
-        break;
+      if (!applied) {
+        const r = await query("SELECT 1 FROM app_documents WHERE user_id = $1 AND data->>'fullContent' = 'outage-content-777'", [u.user.id]);
+        if (r.rowCount) applied = true;
       }
+      if (!syncApplied) {
+        const rSync = await query("SELECT 1 FROM app_documents WHERE user_id = $1 AND id = 'sync_outage_1'", [u.user.id]);
+        if (rSync.rowCount) syncApplied = true;
+      }
+      if (applied && syncApplied) break;
       await new Promise((res) => setTimeout(res, 300));
     }
     assert.equal(applied, true, 'write queued during the outage is applied after recovery');
+    assert.equal(syncApplied, true, 'sync queued during the outage is applied after recovery');
 
     const after = await api(server, 'POST', '/api/documents', { title: 'After', type: 'ai-writer', fullContent: 'after-recovery' }, u.token);
     assert.equal(after.status, 200);
@@ -202,5 +212,33 @@ test('database outage: saves are not reported as successful; queued writes apply
   } finally {
     await server.stop();
     await proxy.close();
+  }
+});
+
+test('graceful shutdown flushes in-flight pending writes before exiting', { skip }, async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adh-shutdown-'));
+  const server = await startTestServer({ DATABASE_URL: dbUrl, REQUIRE_DATABASE: 'true' }, { dataDir });
+
+  try {
+    const u = await registerUser(server);
+
+    // Dispatch multiple writes rapidly without awaiting completion, then trigger SIGTERM immediately
+    const titles = Array.from({ length: 15 }, (_, i) => `Inflight ${i}`);
+    const writePromises = titles.map((title, i) =>
+      api(server, 'POST', '/api/documents', { title, type: 'ai-writer', fullContent: `inflight-content-${i}` }, u.token)
+    );
+
+    // Immediately signal graceful shutdown while writes are in flight
+    const exitCode = await server.stop('SIGTERM');
+    assert.equal(exitCode, 0, 'server exits with code 0 on successful flush');
+
+    // Wait for promise rejections or responses (some may have finished or aborted on closed socket)
+    await Promise.allSettled(writePromises);
+
+    // Directly query PostgreSQL to verify all documents were durably written to the database
+    const rows = await query('SELECT count(*)::int AS n FROM app_documents WHERE user_id = $1', [u.user.id]);
+    assert.equal(rows.rows[0].n, 15, 'all in-flight writes were successfully flushed to PostgreSQL');
+  } finally {
+    await server.stop();
   }
 });

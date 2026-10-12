@@ -165,6 +165,46 @@ export async function initStore(): Promise<void> {
     try {
       pgStore = new PostgresStore(dbUrl);
       await pgStore.migrate();
+
+      // Check for legacy JSON backup files in data dir to auto-import once
+      const dir = getDataDir();
+      const usersFile = path.join(dir, 'users.json');
+      const docsFile = path.join(dir, 'documents.json');
+      if (fs.existsSync(usersFile) || fs.existsSync(docsFile)) {
+        const rawUsers = readJsonFile<any[]>(usersFile, []);
+        const rawSessions = readJsonFile<any[]>(path.join(dir, 'sessions.json'), []);
+        const rawDocs = readJsonFile<any[]>(docsFile, []);
+        const rawUsage = readJsonFile<Record<string, number>>(path.join(dir, 'usage.json'), {});
+        const rawPurchases = readJsonFile<any[]>(path.join(dir, 'purchases.json'), []);
+
+        const sessionsToImport = (Array.isArray(rawSessions) ? rawSessions : [])
+          .map((s: any) => {
+            const tokenHash =
+              typeof s?.tokenHash === 'string'
+                ? s.tokenHash
+                : typeof s?.token === 'string' && s.token
+                  ? crypto.createHash('sha256').update(s.token).digest('hex')
+                  : null;
+            if (!tokenHash || typeof s?.userId !== 'string') return null;
+            return {
+              tokenHash,
+              userId: s.userId,
+              createdAt: Number(s.createdAt) || 0,
+              expiresAt: Number(s.expiresAt) || 0,
+            };
+          })
+          .filter(Boolean) as any[];
+
+        const sourceKey = path.resolve(dir);
+        await pgStore.importJson(sourceKey, {
+          users: Array.isArray(rawUsers) ? rawUsers : [],
+          sessions: sessionsToImport,
+          documents: Array.isArray(rawDocs) ? rawDocs : [],
+          usage: rawUsage && typeof rawUsage === 'object' && !Array.isArray(rawUsage) ? rawUsage : {},
+          purchases: Array.isArray(rawPurchases) ? rawPurchases : [],
+        });
+      }
+
       const loaded = await pgStore.loadAll();
       users = loaded.users || [];
       sessions = loaded.sessions || [];
@@ -735,9 +775,9 @@ export function getWriteMark(): number {
   return pgStore ? pgStore.writeMark() : Date.now();
 }
 
-export async function confirmPersisted(mark: number): Promise<boolean> {
+export async function confirmPersisted(mark: number, timeoutMs = 10000): Promise<boolean> {
   if (pgStore) {
-    return pgStore.waitForWrites(mark);
+    return pgStore.waitForWrites(mark, timeoutMs);
   }
   return true;
 }
@@ -814,5 +854,44 @@ export async function checkDatabaseReadiness(): Promise<{ ready: boolean; config
   }
   const isAlive = await pgStore.ping();
   return { ready: isAlive, configured: true, error: isAlive ? undefined : 'PostgreSQL ping failed' };
+}
+
+export function getStorageStatus(): { pendingWrites: number; failedWrites: number; connected: boolean } {
+  const dbUrl = (process.env.DATABASE_URL || '').trim();
+  if (dbUrl && !pgStore) {
+    return { pendingWrites: 0, failedWrites: 0, connected: false };
+  }
+  if (pgStore) {
+    return pgStore.getStatus();
+  }
+  return { pendingWrites: 0, failedWrites: 0, connected: true };
+}
+
+export async function saveUserDocumentWithConfirmation(
+  userId: string,
+  doc: Parameters<typeof saveUserDocument>[1],
+  timeoutMs = 2500
+): Promise<{ document: StoredDocument; persisted: boolean }> {
+  const mark = getWriteMark();
+  const document = saveUserDocument(userId, doc);
+  const persisted = await confirmPersisted(mark, timeoutMs);
+  return { document, persisted };
+}
+
+export async function syncUserDocumentsWithConfirmation(
+  userId: string,
+  clientDocs: Parameters<typeof syncUserDocuments>[1],
+  timeoutMs = 2500
+): Promise<{ documents: StoredDocument[]; persisted: boolean }> {
+  const mark = getWriteMark();
+  const docs = syncUserDocuments(userId, clientDocs);
+  const persisted = await confirmPersisted(mark, timeoutMs);
+  return { documents: docs, persisted };
+}
+
+export async function closeStore(timeoutMs = 10000): Promise<void> {
+  if (pgStore) {
+    await pgStore.close(timeoutMs);
+  }
 }
 
