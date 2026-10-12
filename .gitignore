@@ -8,7 +8,8 @@ coverage/
 !.env.example
 
 # Local databases and runtime data
-data/
+/data/
+!src/data/
 
 # Signing keystores & credentials (protect production keys from Git)
 *.keystore
