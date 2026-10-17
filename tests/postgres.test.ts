@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import pg from 'pg';
-import { startTestServer, api, registerUser, freePort, type TestServer } from './helpers.ts';
+import { startTestServer, api, registerUser, freePort, startMockResend, extractResetToken, type TestServer } from './helpers.ts';
 import { PostgresStore } from '../server/db.ts';
 
 const BASE_URL = process.env.TEST_DATABASE_URL || '';
@@ -131,6 +131,7 @@ async function startProxy(targetUrl: string) {
   const target = new URL(targetUrl);
   const sockets = new Set<net.Socket>();
   let down = false;
+  let paused = false;
   const port = await freePort();
   const server = net.createServer((client) => {
     if (down) return client.destroy();
@@ -138,6 +139,10 @@ async function startProxy(targetUrl: string) {
     sockets.add(client);
     sockets.add(upstream);
     client.pipe(upstream).pipe(client);
+    if (paused) {
+      client.pause();
+      upstream.pause();
+    }
     const cleanup = () => {
       client.destroy();
       upstream.destroy();
@@ -159,7 +164,21 @@ async function startProxy(targetUrl: string) {
       down = value;
       if (value) for (const s of sockets) s.destroy();
     },
-    close: () => new Promise<void>((r) => server.close(() => r())),
+    // Hold bytes in both directions without closing sockets, so in-flight
+    // queries hang and queued writes stay pending. `resume()` lets them flow.
+    pause() {
+      paused = true;
+      for (const s of sockets) s.pause();
+    },
+    resume() {
+      paused = false;
+      for (const s of sockets) s.resume();
+    },
+    close: () =>
+      new Promise<void>((r) => {
+        for (const s of sockets) s.destroy();
+        server.close(() => r());
+      }),
   };
 }
 
@@ -215,30 +234,220 @@ test('database outage: saves are not reported as successful; queued writes apply
   }
 });
 
-test('graceful shutdown flushes in-flight pending writes before exiting', { skip }, async () => {
+test('graceful shutdown flushes in-flight pending writes before exiting', { skip, timeout: 60000 }, async () => {
+  // Route the database through a proxy we can hold, so writes stay queued and
+  // genuinely in flight when the shutdown signal arrives.
+  const proxy = await startProxy(dbUrl);
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adh-shutdown-'));
-  const server = await startTestServer({ DATABASE_URL: dbUrl, REQUIRE_DATABASE: 'true' }, { dataDir });
+  const server = await startTestServer({ DATABASE_URL: proxy.url, REQUIRE_DATABASE: 'true' }, { dataDir });
 
   try {
     const u = await registerUser(server);
 
-    // Dispatch multiple writes rapidly without awaiting completion, then trigger SIGTERM immediately
+    // Hold database traffic so the writes cannot complete yet.
+    proxy.pause();
+
+    // Baseline of writes already queued (for example by registration) that are
+    // now held too, so the wait below is measured against our own 15 writes.
+    const baseline = (await api(server, 'GET', '/api/health')).data?.storage?.pendingWrites ?? 0;
+
     const titles = Array.from({ length: 15 }, (_, i) => `Inflight ${i}`);
-    const writePromises = titles.map((title, i) =>
-      api(server, 'POST', '/api/documents', { title, type: 'ai-writer', fullContent: `inflight-content-${i}` }, u.token)
+    const writePromises = titles.map((title, i) => {
+      const promise = api(server, 'POST', '/api/documents', { title, type: 'ai-writer', fullContent: `inflight-content-${i}` }, u.token);
+      // Attach a rejection handler immediately: if the server closes the socket
+      // before the response arrives, an unhandled rejection would fail the run
+      // instead of being collected by allSettled() below.
+      promise.catch(() => {});
+      return promise;
+    });
+
+    // Wait until every request has actually reached the server and been queued as
+    // a pending write. The database is held and the write queue is ordered, so
+    // storage.pendingWrites climbs to 15 and stays there.
+    const deadline = Date.now() + 20000;
+    let pending = 0;
+    while (Date.now() < deadline) {
+      const health = await api(server, 'GET', '/api/health');
+      pending = health.data?.storage?.pendingWrites ?? 0;
+      if (pending >= baseline + titles.length) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.ok(
+      pending >= baseline + titles.length,
+      `all ${titles.length} in-flight writes reached the server and are queued (pending=${pending}, baseline=${baseline})`
     );
 
-    // Immediately signal graceful shutdown while writes are in flight
+    // Release the database and immediately request a graceful shutdown: the
+    // server must flush every queued write before exiting.
+    proxy.resume();
     const exitCode = await server.stop('SIGTERM');
     assert.equal(exitCode, 0, 'server exits with code 0 on successful flush');
 
-    // Wait for promise rejections or responses (some may have finished or aborted on closed socket)
+    // Collect responses/rejections (some requests may have completed or been
+    // aborted on the closed socket).
     await Promise.allSettled(writePromises);
 
-    // Directly query PostgreSQL to verify all documents were durably written to the database
+    // Directly query PostgreSQL to verify all documents were durably written.
     const rows = await query('SELECT count(*)::int AS n FROM app_documents WHERE user_id = $1', [u.user.id]);
     assert.equal(rows.rows[0].n, 15, 'all in-flight writes were successfully flushed to PostgreSQL');
   } finally {
+    proxy.resume();
     await server.stop();
+    await proxy.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Persistent (PostgreSQL-backed) password-reset tokens
+// ---------------------------------------------------------------------------
+
+const RESET_ENV_BASE = {
+  APP_URL: 'https://app.example.test',
+  RESEND_API_KEY: 'test-resend-key',
+  PASSWORD_RESET_EMAIL_FROM: 'AI Document Helper <no-reply@example.test>',
+};
+
+test('reset tokens are stored in PostgreSQL: they survive a restart and are single-use', { skip, timeout: 60000 }, async () => {
+  const mock = await startMockResend();
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adh-pr-pg-'));
+  const env = { DATABASE_URL: dbUrl, REQUIRE_DATABASE: 'true', ...RESET_ENV_BASE, RESEND_API_URL: mock.url };
+  let server = await startTestServer(env, { dataDir });
+  try {
+    const u = await registerUser(server, 'original-pass-1');
+
+    const req = await api(server, 'POST', '/api/auth/password-reset/request', { email: u.email });
+    assert.equal(req.status, 200);
+    assert.equal(mock.state.calls, 1);
+    const token = extractResetToken(mock.state.lastBody);
+    assert.ok(token && token.length >= 32, 'a reset token was delivered');
+
+    const stored = await query('SELECT count(*)::int AS n FROM app_password_resets WHERE user_id = $1', [u.user.id]);
+    assert.equal(stored.rows[0].n, 1, 'the reset token is persisted in PostgreSQL');
+
+    // Restart the server: the token must still work, which proves it lives in the
+    // database rather than in process memory.
+    await server.stop('SIGTERM');
+    server = await startTestServer(env, { dataDir });
+
+    const ok = await api(server, 'POST', '/api/auth/password-reset/confirm', { token, newPassword: 'reset-pass-2' });
+    assert.equal(ok.status, 200);
+
+    const reuse = await api(server, 'POST', '/api/auth/password-reset/confirm', { token, newPassword: 'reset-pass-3' });
+    assert.equal(reuse.status, 400, 'a consumed token cannot be reused');
+
+    const left = await query('SELECT count(*)::int AS n FROM app_password_resets WHERE user_id = $1', [u.user.id]);
+    assert.equal(left.rows[0].n, 0, 'the consumed token is removed from the database');
+
+    assert.equal((await api(server, 'POST', '/api/auth/login', { email: u.email, password: 'reset-pass-2' })).status, 200);
+    assert.equal((await api(server, 'POST', '/api/auth/login', { email: u.email, password: 'original-pass-1' })).status, 401);
+  } finally {
+    await server.stop();
+    await mock.close();
+  }
+});
+
+test('invalid and expired reset tokens are rejected and removed', { skip, timeout: 60000 }, async () => {
+  const mock = await startMockResend();
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adh-pr-exp-'));
+  const env = { DATABASE_URL: dbUrl, REQUIRE_DATABASE: 'true', ...RESET_ENV_BASE, RESEND_API_URL: mock.url, PASSWORD_RESET_TTL_MS: '200' };
+  const server = await startTestServer(env, { dataDir });
+  try {
+    const u = await registerUser(server, 'correct-horse-1');
+
+    const invalid = await api(server, 'POST', '/api/auth/password-reset/confirm', { token: 'a'.repeat(64), newPassword: 'whatever-123' });
+    assert.equal(invalid.status, 400, 'an unknown token is rejected');
+
+    const req = await api(server, 'POST', '/api/auth/password-reset/request', { email: u.email });
+    assert.equal(req.status, 200);
+    const token = extractResetToken(mock.state.lastBody);
+    assert.ok(token);
+
+    await new Promise((r) => setTimeout(r, 500));
+
+    const expired = await api(server, 'POST', '/api/auth/password-reset/confirm', { token, newPassword: 'expired-pass-1' });
+    assert.equal(expired.status, 400, 'an expired token is rejected');
+    assert.equal((await api(server, 'POST', '/api/auth/login', { email: u.email, password: 'correct-horse-1' })).status, 200);
+
+    const left = await query('SELECT count(*)::int AS n FROM app_password_resets WHERE user_id = $1', [u.user.id]);
+    assert.equal(left.rows[0].n, 0, 'the expired token is removed, so it cannot be replayed');
+  } finally {
+    await server.stop();
+    await mock.close();
+  }
+});
+
+test('a too-short password is rejected without consuming the reset token', { skip, timeout: 60000 }, async () => {
+  const mock = await startMockResend();
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adh-pr-short-'));
+  const env = { DATABASE_URL: dbUrl, REQUIRE_DATABASE: 'true', ...RESET_ENV_BASE, RESEND_API_URL: mock.url };
+  const server = await startTestServer(env, { dataDir });
+  try {
+    const u = await registerUser(server, 'original-pass-1');
+    const req = await api(server, 'POST', '/api/auth/password-reset/request', { email: u.email });
+    assert.equal(req.status, 200);
+    const token = extractResetToken(mock.state.lastBody);
+    assert.ok(token);
+
+    const short = await api(server, 'POST', '/api/auth/password-reset/confirm', { token, newPassword: '123' });
+    assert.equal(short.status, 400);
+
+    // Validation runs before consumption, so the token is still usable.
+    const ok = await api(server, 'POST', '/api/auth/password-reset/confirm', { token, newPassword: 'good-pass-1' });
+    assert.equal(ok.status, 200);
+  } finally {
+    await server.stop();
+    await mock.close();
+  }
+});
+
+test('concurrent reset confirmations allow exactly one success', { skip, timeout: 60000 }, async () => {
+  const mock = await startMockResend();
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adh-pr-conc-'));
+  const env = { DATABASE_URL: dbUrl, REQUIRE_DATABASE: 'true', ...RESET_ENV_BASE, RESEND_API_URL: mock.url };
+  const server = await startTestServer(env, { dataDir });
+  try {
+    const u = await registerUser(server, 'original-pass-1');
+    const req = await api(server, 'POST', '/api/auth/password-reset/request', { email: u.email });
+    assert.equal(req.status, 200);
+    const token = extractResetToken(mock.state.lastBody);
+    assert.ok(token);
+
+    const attempts = await Promise.all(
+      Array.from({ length: 8 }, (_, i) => api(server, 'POST', '/api/auth/password-reset/confirm', { token, newPassword: `race-pass-${i}` }))
+    );
+    assert.equal(attempts.filter((r) => r.status === 200).length, 1, 'exactly one concurrent confirmation succeeds');
+    assert.equal(attempts.filter((r) => r.status === 400).length, 7, 'all other concurrent confirmations are rejected');
+
+    let accepted = 0;
+    for (let i = 0; i < 8; i += 1) {
+      if ((await api(server, 'POST', '/api/auth/login', { email: u.email, password: `race-pass-${i}` })).status === 200) accepted += 1;
+    }
+    assert.equal(accepted, 1, 'exactly one new password takes effect');
+  } finally {
+    await server.stop();
+    await mock.close();
+  }
+});
+
+test('reset confirmation responds (does not hang) when PostgreSQL is unavailable', { skip, timeout: 60000 }, async () => {
+  const proxy = await startProxy(dbUrl);
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adh-pr-down-'));
+  const server = await startTestServer({ DATABASE_URL: proxy.url, REQUIRE_DATABASE: 'true' }, { dataDir });
+  try {
+    proxy.setDown(true);
+    const pending = api(server, 'POST', '/api/auth/password-reset/confirm', { token: 'a'.repeat(64), newPassword: 'whatever-123' });
+    // Never let a lingering request surface as an unhandled rejection.
+    pending.catch(() => {});
+    // Bounded: if the server fails to respond this test fails rather than hangs.
+    const res = await Promise.race([
+      pending,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 20000)),
+    ]);
+    assert.ok(res, 'confirmation must respond rather than hang when the database is unavailable');
+    assert.equal((res as { status: number }).status, 500, 'a database outage returns an error');
+  } finally {
+    proxy.setDown(false);
+    await server.stop('SIGKILL');
+    await proxy.close();
   }
 });

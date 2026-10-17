@@ -191,7 +191,51 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // 1. Android Native Flow: Official Credential Manager Account Picker (No GOOGLE_CLIENT_SECRET required)
       if (isNativeGoogleSignInAvailable()) {
         logger.info('Initiating Android Credential Manager Google Sign-In');
-        const launched = launchNativeGoogleSignIn('358349564336-v9fq2to3b94q8482en0pt9f3b58scfgs.apps.googleusercontent.com');
+
+        // Fetch the server-configured web client ID and a single-use nonce before launching.
+        // Never hardcode the client ID in the page; the server is authoritative.
+        let webClientId = '';
+        let serverNonce: string | undefined;
+
+        try {
+          const statusRes = await fetch(buildApiUrl('/api/auth/google/status'));
+          if (statusRes.ok) {
+            const statusData = await statusRes.json();
+            if (statusData.clientId) {
+              webClientId = String(statusData.clientId);
+            }
+          }
+        } catch {
+          // Ignore status fetch failure; fall back below.
+        }
+
+        if (!webClientId) {
+          const status = await getGoogleOAuthStatus();
+          if (status.clientId) {
+            webClientId = status.clientId;
+          }
+        }
+
+        if (!webClientId) {
+          return { success: false, requiresConfig: true, error: 'Google Sign-In is not configured on the server.' };
+        }
+
+        try {
+          const nonceRes = await fetch(buildApiUrl('/api/auth/google/nonce'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+          });
+          if (nonceRes.ok) {
+            const nonceData = await nonceRes.json();
+            if (nonceData.nonce) {
+              serverNonce = String(nonceData.nonce);
+            }
+          }
+        } catch {
+          // Ignore nonce fetch failure; sign-in can proceed without a nonce.
+        }
+
+        const launched = launchNativeGoogleSignIn(webClientId, serverNonce);
         if (launched) {
           return new Promise((resolve) => {
             const handleSuccess = async (event: any) => {
@@ -245,8 +289,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
             window.addEventListener('onNativeGoogleSignInSuccess' as any, handleSuccess);
             window.addEventListener('onNativeGoogleSignInError' as any, handleError);
-            (window as any).onNativeGoogleSignInSuccess = (data: any) => handleSuccess({ detail: data });
-            (window as any).onNativeGoogleSignInError = (data: any) => handleError({ detail: data });
           });
         }
       }

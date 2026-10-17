@@ -22,6 +22,14 @@ export interface PersistedSession {
   expiresAt: number;
 }
 
+export interface PersistedPasswordReset {
+  tokenHash: string;
+  userId: string;
+  email: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
 export interface LoadedData {
   users: any[];
   sessions: PersistedSession[];
@@ -126,6 +134,23 @@ const MIGRATIONS: Migration[] = [
       )`,
       `CREATE INDEX IF NOT EXISTS app_pending_purchases_account_idx
         ON app_pending_purchases (obfuscated_external_account_id)`,
+    ],
+  },
+  {
+    version: 3,
+    name: 'password_reset_tokens',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS app_password_resets (
+        token_hash TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        email TEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        expires_at BIGINT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS app_password_resets_user_id_idx
+        ON app_password_resets (user_id)`,
+      `CREATE INDEX IF NOT EXISTS app_password_resets_expires_at_idx
+        ON app_password_resets (expires_at)`,
     ],
   },
 ];
@@ -892,5 +917,74 @@ export class PostgresStore {
       'DELETE FROM app_pending_purchases WHERE purchase_token = $1',
       [purchaseToken]
     );
+  }
+
+  // -----------------------------------------------------------
+  // PASSWORD RESET TOKENS
+  // -----------------------------------------------------------
+
+  insertPasswordReset(record: PersistedPasswordReset): void {
+    this.enqueue(
+      `insert password reset for ${record.userId}`,
+      `INSERT INTO app_password_resets (token_hash, user_id, email, created_at, expires_at)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (token_hash) DO NOTHING`,
+      [
+        record.tokenHash,
+        record.userId,
+        record.email,
+        record.createdAt,
+        record.expiresAt,
+      ]
+    );
+  }
+
+  deletePasswordReset(tokenHash: string): void {
+    this.enqueue(
+      'delete password reset',
+      'DELETE FROM app_password_resets WHERE token_hash = $1',
+      [tokenHash]
+    );
+  }
+
+  deletePasswordResetsForUser(userId: string): void {
+    this.enqueue(
+      `delete password resets for ${userId}`,
+      'DELETE FROM app_password_resets WHERE user_id = $1',
+      [userId]
+    );
+  }
+
+  deleteExpiredPasswordResets(now: number): void {
+    this.enqueue(
+      'delete expired password resets',
+      'DELETE FROM app_password_resets WHERE expires_at <= $1',
+      [now]
+    );
+  }
+
+  /**
+   * Atomically consumes a reset token: the row is deleted and returned in a
+   * single statement, so two concurrent confirmations can never both succeed.
+   * The row is removed even if it has expired (expiry is checked by the
+   * caller), so a token can never be replayed.
+   */
+  async consumePasswordReset(
+    tokenHash: string
+  ): Promise<PersistedPasswordReset | null> {
+    const res = await this.pool.query(
+      `DELETE FROM app_password_resets WHERE token_hash = $1
+       RETURNING user_id, email, created_at, expires_at`,
+      [tokenHash]
+    );
+    if (!res.rows.length) return null;
+    const row = res.rows[0];
+    return {
+      tokenHash,
+      userId: row.user_id,
+      email: row.email,
+      createdAt: Number(row.created_at),
+      expiresAt: Number(row.expires_at),
+    };
   }
 }

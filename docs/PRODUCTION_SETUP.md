@@ -102,7 +102,7 @@ gcloud run deploy <SERVICE_NAME> \
 ```
 
 The service must be built with `npm run build` and started with `npm start`
-(`node dist/server.cjs`). The repository has no Dockerfile; if you deploy with
+(which runs `tsx server.ts`; `tsx` is a production dependency). The repository has no Dockerfile; if you deploy with
 `--source`, confirm in the Cloud Build log that the build step ran
 `npm run build` (add a `gcp-build` script or a Dockerfile if it did not).
 Use Node.js 22 (`engines.node` in `package.json`).
