@@ -22,10 +22,8 @@ import {
   syncUserDocuments,
   checkRateLimit,
   getDailyUsage,
-  canPerformAiAction,
   reserveDailyUsage,
   releaseDailyUsage,
-  incrementDailyUsage,
   invalidateSession,
   createSession,
   setUserPassword,
@@ -176,10 +174,14 @@ function getAuthContext(req: express.Request): { user: StoredUser | null; identi
   return { user, identifier, isPro };
 }
 
-// Server-side AI usage check middleware helper
-function checkAiUsage(req: express.Request, res: express.Response): { user: StoredUser | null; identifier: string; isPro: boolean } | null {
+// Server-side AI usage check middleware helper.
+// Reserves the daily free action atomically (check + increment in one step)
+// so concurrent requests cannot exceed the free quota. A successful action
+// keeps the reservation; a failed action refunds it via releaseDailyUsage.
+function checkAiUsage(req: express.Request, res: express.Response): { user: StoredUser | null; identifier: string; isPro: boolean; usageKey: string } | null {
   const authCtx = getAuthContext(req);
-  if (!canPerformAiAction(authCtx.identifier, authCtx.isPro)) {
+  const reservation = reserveDailyUsage(authCtx.identifier, authCtx.isPro);
+  if (!reservation.allowed) {
     const currentUsage = getDailyUsage(authCtx.identifier, authCtx.isPro);
     res.status(429).json({
       error: 'Daily free limit reached (5/5 actions used today). Upgrade to Pro for unlimited AI actions.',
@@ -188,7 +190,7 @@ function checkAiUsage(req: express.Request, res: express.Response): { user: Stor
     });
     return null;
   }
-  return authCtx;
+  return { ...authCtx, usageKey: reservation.key };
 }
 
 // Lazy initialization of Gemini API
@@ -390,7 +392,6 @@ Respond STRICTLY with valid JSON in this exact structure:
 
     const parsed = parseJsonFromText(response.text || '');
     if (parsed) {
-      incrementDailyUsage(authCtx.identifier);
       const extractedText =
         parsed.extractedText !== undefined
           ? parsed.extractedText
@@ -406,7 +407,6 @@ Respond STRICTLY with valid JSON in this exact structure:
       });
     }
 
-    incrementDailyUsage(authCtx.identifier);
     return res.json({
       extractedText: response.text || 'No readable text could be identified in the image.',
       detectedLanguage: 'Auto-detected',
@@ -415,6 +415,7 @@ Respond STRICTLY with valid JSON in this exact structure:
     });
   } catch (err: any) {
     console.error('Error in /api/photo-to-text:', err);
+    if (authCtx.usageKey) releaseDailyUsage(authCtx.usageKey);
     res.status(500).json({
       error: getSafeAiErrorMessage(err, 'Failed to process document photo. Please verify image clarity and try again.'),
     });
@@ -487,7 +488,6 @@ Output STRICTLY valid JSON with this exact schema:
     });
 
     const parsed = parseJsonFromText(response.text || '');
-    incrementDailyUsage(authCtx.identifier);
     if (parsed && parsed.summary) {
       return res.json(parsed);
     }
@@ -501,6 +501,7 @@ Output STRICTLY valid JSON with this exact schema:
     });
   } catch (err: any) {
     console.error('Error in /api/pdf-summary:', err);
+    if (authCtx.usageKey) releaseDailyUsage(authCtx.usageKey);
     res.status(500).json({
       error: getSafeAiErrorMessage(err, 'Failed to summarize document. Please ensure document contents are readable.'),
     });
@@ -558,7 +559,6 @@ Return STRICTLY valid JSON:
     });
 
     const parsed = parseJsonFromText(response.text || '');
-    incrementDailyUsage(authCtx.identifier);
     if (parsed && parsed.answer) {
       return res.json(parsed);
     }
@@ -570,6 +570,7 @@ Return STRICTLY valid JSON:
     });
   } catch (err: any) {
     console.error('Error in /api/ask-document:', err);
+    if (authCtx.usageKey) releaseDailyUsage(authCtx.usageKey);
     res.status(500).json({
       error: getSafeAiErrorMessage(err, 'Failed to answer question on document.'),
     });
@@ -627,7 +628,6 @@ Output STRICTLY valid JSON:
     });
 
     const parsed = parseJsonFromText(response.text || '');
-    incrementDailyUsage(authCtx.identifier);
     if (parsed && parsed.translatedText) {
       return res.json(parsed);
     }
@@ -640,6 +640,7 @@ Output STRICTLY valid JSON:
     });
   } catch (err: any) {
     console.error('Error in /api/hindi-translation:', err);
+    if (authCtx.usageKey) releaseDailyUsage(authCtx.usageKey);
     res.status(500).json({
       error: getSafeAiErrorMessage(err, 'Failed to translate document text.'),
     });
@@ -698,7 +699,6 @@ Return STRICTLY valid JSON:
     });
 
     const parsed = parseJsonFromText(response.text || '');
-    incrementDailyUsage(authCtx.identifier);
     if (parsed && parsed.content) {
       return res.json(parsed);
     }
@@ -710,6 +710,7 @@ Return STRICTLY valid JSON:
     });
   } catch (err: any) {
     console.error('Error in /api/ai-writer:', err);
+    if (authCtx.usageKey) releaseDailyUsage(authCtx.usageKey);
     res.status(500).json({
       error: getSafeAiErrorMessage(err, 'Failed to draft document with AI.'),
     });
@@ -816,7 +817,6 @@ Return STRICTLY valid JSON:
     });
 
     const parsed = parseJsonFromText(response.text || '');
-    incrementDailyUsage(authCtx.identifier);
     if (parsed) {
       return res.json({ success: true, data: parsed });
     }
@@ -830,6 +830,7 @@ Return STRICTLY valid JSON:
     });
   } catch (err: any) {
     console.error('Error in /api/quick-action:', err);
+    if (authCtx.usageKey) releaseDailyUsage(authCtx.usageKey);
     res.status(500).json({
       error: getSafeAiErrorMessage(err, 'Failed to execute quick action.'),
     });

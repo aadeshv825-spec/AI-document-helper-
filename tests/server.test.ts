@@ -207,9 +207,22 @@ test('failed AI requests do not consume free usage; limit is enforced atomically
   assert.equal(invalid.status, 413);
 });
 
-test('daily free limit: concurrent requests cannot exceed 5 (store level)', async () => {
-  // Covered against the real store in tests/store.test.ts.
-  assert.ok(true);
+test('daily free limit: concurrent failing AI requests release their reservations (no quota leak)', async () => {
+  const u = await registerUser(server);
+
+  // GEMINI_API_KEY is not configured in tests, so every AI call fails after
+  // reserving its free action. The reservation must be released on failure so
+  // concurrent failures never accumulate against the daily limit.
+  const results = await Promise.all(
+    Array.from({ length: 20 }, () => api(server, 'POST', '/api/hindi-translation', { text: 'hello', sourceLang: 'English', targetLang: 'Hindi' }, u.token))
+  );
+
+  for (const r of results) {
+    assert.ok(r.status === 500, `unexpected status ${r.status}`);
+  }
+
+  const usage = await api(server, 'GET', '/api/user/usage', undefined, u.token);
+  assert.equal(usage.data.dailyUsed ?? usage.data.usage?.dailyUsed, 0, 'failed reservations must be refunded, even under concurrency');
 });
 
 test('input validation, unknown routes and payload limits return JSON errors', async () => {
