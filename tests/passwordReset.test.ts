@@ -208,3 +208,19 @@ test('password reset requests are rate limited', { timeout: 60000 }, async () =>
     await server.stop();
   }
 });
+
+test('reset links require an HTTPS APP_URL', { timeout: 60000 }, async () => {
+  // A reset token must never travel over an insecure link.
+  const server = await startTestServer(
+    resetEnv({ APP_URL: 'http://insecure.example.test' }),
+    { dataDir: tmpDir('adh-pr-http-') }
+  );
+  try {
+    const status = await api(server, 'GET', '/api/auth/password-reset/status');
+    assert.equal(status.data.available, false);
+    const req = await api(server, 'POST', '/api/auth/password-reset/request', { email: uniqueEmail() });
+    assert.equal(req.status, 503);
+  } finally {
+    await server.stop();
+  }
+});

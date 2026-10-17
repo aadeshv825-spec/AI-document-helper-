@@ -302,3 +302,12 @@ test('apiClient getApiBaseUrl has no development url fallback', async () => {
   assert.ok(!url.includes('ais-dev-'), 'must never fall back to ais-dev url');
   assert.ok(!url.includes('localhost'), 'must never fall back to localhost');
 });
+
+test('startTestServer surfaces a real startup failure instead of retrying it away', async () => {
+  // REQUIRE_DATABASE=true with no DATABASE_URL makes the server exit at startup.
+  // That is not a port collision, so the harness must throw rather than retry.
+  await assert.rejects(
+    () => startTestServer({ REQUIRE_DATABASE: 'true' }),
+    /Server exited early|Server did not start/
+  );
+});

@@ -428,3 +428,18 @@ test('concurrent reset confirmations allow exactly one success', { skip, timeout
     await mock.close();
   }
 });
+
+test('reset confirmation fails safely (no hang) when PostgreSQL is unavailable', { skip, timeout: 60000 }, async () => {
+  const proxy = await startProxy(dbUrl);
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adh-pr-down-'));
+  const server = await startTestServer({ DATABASE_URL: proxy.url, REQUIRE_DATABASE: 'true' }, { dataDir });
+  try {
+    proxy.setDown(true);
+    const res = await api(server, 'POST', '/api/auth/password-reset/confirm', { token: 'a'.repeat(64), newPassword: 'whatever-123' });
+    assert.equal(res.status, 500, 'a database outage returns an error rather than hanging');
+  } finally {
+    proxy.setDown(false);
+    await server.stop();
+    await proxy.close();
+  }
+});

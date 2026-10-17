@@ -965,7 +965,13 @@ const PASSWORD_RESET_TTL_MS =
   Number(process.env.PASSWORD_RESET_TTL_MS) > 0 ? Number(process.env.PASSWORD_RESET_TTL_MS) : 15 * 60 * 1000;
 
 function isPasswordResetEmailConfigured(): boolean {
-  return Boolean(RESEND_API_KEY && PASSWORD_RESET_EMAIL_FROM && PASSWORD_RESET_APP_URL);
+  // The reset-link base must be HTTPS, so a reset token is never sent in clear
+  // text over an insecure link. This matches what .env.example documents.
+  return Boolean(
+    RESEND_API_KEY &&
+      PASSWORD_RESET_EMAIL_FROM &&
+      PASSWORD_RESET_APP_URL.startsWith('https://')
+  );
 }
 
 async function sendPasswordResetEmail(
