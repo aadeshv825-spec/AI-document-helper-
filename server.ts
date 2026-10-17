@@ -54,6 +54,7 @@ import {
   consumePasswordResetToken,
   deletePasswordResetToken,
   purgeExpiredPasswordResetTokens,
+  storeReady,
 } from './server/store.ts';
 import type { StoredUser, GooglePlayPurchaseRecord } from './server/store.ts';
 import {
@@ -2319,6 +2320,10 @@ app.all('/api/*', (req, res) => {
 
 // Vite middleware & production static setup
 async function startServer() {
+  // Do not accept traffic until the store (migrations + cache hydration) is
+  // ready; if a required database is unreachable this rejects and startup fails.
+  await storeReady;
+
   if (process.env.SERVE_FRONTEND === 'false') {
     // API-only mode (used in test suite)
   } else {

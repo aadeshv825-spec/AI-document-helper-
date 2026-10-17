@@ -429,17 +429,25 @@ test('concurrent reset confirmations allow exactly one success', { skip, timeout
   }
 });
 
-test('reset confirmation fails safely (no hang) when PostgreSQL is unavailable', { skip, timeout: 60000 }, async () => {
+test('reset confirmation responds (does not hang) when PostgreSQL is unavailable', { skip, timeout: 60000 }, async () => {
   const proxy = await startProxy(dbUrl);
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adh-pr-down-'));
   const server = await startTestServer({ DATABASE_URL: proxy.url, REQUIRE_DATABASE: 'true' }, { dataDir });
   try {
     proxy.setDown(true);
-    const res = await api(server, 'POST', '/api/auth/password-reset/confirm', { token: 'a'.repeat(64), newPassword: 'whatever-123' });
-    assert.equal(res.status, 500, 'a database outage returns an error rather than hanging');
+    const pending = api(server, 'POST', '/api/auth/password-reset/confirm', { token: 'a'.repeat(64), newPassword: 'whatever-123' });
+    // Never let a lingering request surface as an unhandled rejection.
+    pending.catch(() => {});
+    // Bounded: if the server fails to respond this test fails rather than hangs.
+    const res = await Promise.race([
+      pending,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 20000)),
+    ]);
+    assert.ok(res, 'confirmation must respond rather than hang when the database is unavailable');
+    assert.equal((res as { status: number }).status, 500, 'a database outage returns an error');
   } finally {
     proxy.setDown(false);
-    await server.stop();
+    await server.stop('SIGKILL');
     await proxy.close();
   }
 });

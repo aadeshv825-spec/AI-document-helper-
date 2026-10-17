@@ -267,8 +267,12 @@ export async function initStore(): Promise<void> {
   }
 }
 
-// Initial auto-load at module import
-void initStore().catch((err) => {
+// Initial auto-load at module import. The server awaits `storeReady` before it
+// starts listening, so requests are never served against an uninitialized store
+// (migrations + cache hydration), and startup fails loudly when a required
+// database cannot be reached.
+export const storeReady: Promise<void> = initStore();
+void storeReady.catch((err) => {
   console.warn('[Store] Initial auto-load note:', err?.message || err);
 });
 
