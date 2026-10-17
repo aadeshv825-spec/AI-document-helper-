@@ -212,12 +212,24 @@ export class PostgresStore {
   private closing = false;
 
   constructor(connectionString: string) {
-    this.pool = new Pool({
+    const isRemote = !connectionString.includes('localhost')
+      && !connectionString.includes('127.0.0.1')
+      && !connectionString.includes('/cloudsql/');
+
+    const poolConfig: pg.PoolConfig = {
       connectionString,
       max: 5,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 10000,
-    });
+    };
+
+    if (isRemote) {
+      // Neon (and other managed PostgreSQL) require TLS. Validate the server
+      // certificate against Node's root CA store rather than skipping verification.
+      poolConfig.ssl = { rejectUnauthorized: true };
+    }
+
+    this.pool = new Pool(poolConfig);
 
     this.pool.on('error', (err: Error) => {
       console.error(
