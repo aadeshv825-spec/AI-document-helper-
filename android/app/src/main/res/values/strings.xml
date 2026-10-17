@@ -7,4 +7,7 @@
     <string name="android_client_id">358349564336-onvft9bdjre63q7gttnlbosfr3ll68ss.apps.googleusercontent.com</string>
     <string name="pro_monthly_sku">ai_doc_pro_monthly</string>
     <string name="pro_annual_sku">ai_doc_pro_annual</string>
+    <!-- Production backend URL. Must be set via PRODUCTION_API_BASE_URL build variable.
+         Leave empty only for development; release builds require a real https URL. -->
+    <string name="production_web_url" translatable="false"></string>
 </resources>

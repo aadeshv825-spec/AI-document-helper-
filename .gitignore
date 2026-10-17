@@ -9,7 +9,6 @@ coverage/
 
 # Local databases and runtime data
 /data/
-!src/data/
 
 # Signing keystores & credentials (protect production keys from Git)
 *.keystore
@@ -21,3 +20,4 @@ local.properties
 android/.gradle/
 android/build/
 android/app/build/
+android/app/src/main/assets/
