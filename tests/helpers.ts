@@ -196,7 +196,7 @@ export async function startMockResend(): Promise<MockResend> {
 /** Extracts the reset token from a captured Resend email body. */
 export function extractResetToken(email: any): string | null {
   const html: string = (email && email.html) || '';
-  const match = html.match(/\/reset-password\?token=([A-Za-z0-9_-]+)/);
+  const match = html.match(/\/reset-password[#?]token=([A-Za-z0-9_-]+)/);
   return match ? match[1] : null;
 }
 

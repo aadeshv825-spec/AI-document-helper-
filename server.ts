@@ -77,6 +77,15 @@ if (process.env.REQUIRE_DATABASE === 'true' && (!process.env.DATABASE_URL || pro
 
 const app = express();
 app.set('trust proxy', 1);
+
+// Baseline security headers applied to every response.
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Frame-Options', 'DENY');
+  next();
+});
+
 const PORT = process.env.NGINX_PORT 
   ? (Number(process.env.DEFAULT_APP_PORT) || 3000) 
   : (Number(process.env.PORT) || 3000);
@@ -1042,7 +1051,9 @@ async function issuePasswordResetForUser(user: { id: string; email: string }): P
   // Build the reset link only from the trusted, explicitly configured APP_URL.
   // It must never fall back to the request Host header, which an attacker can
   // control in order to redirect the reset link to their own domain.
-  const resetUrl = `${PASSWORD_RESET_APP_URL}/reset-password?token=${rawToken}`;
+  // Put the token in the URL fragment so it is never sent to the server, kept
+  // out of access logs and never leaked through the Referer header.
+  const resetUrl = `${PASSWORD_RESET_APP_URL}/reset-password#token=${rawToken}`;
   const delivery = await sendPasswordResetEmail(user.email, resetUrl);
   if (delivery.sent) {
     console.log(`[Auth] Password reset email sent to ${user.email}`);
@@ -1119,7 +1130,6 @@ app.get('/reset-password', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  const rawToken = typeof req.query.token === 'string' ? req.query.token : '';
   res.send(`<!doctype html>
 <html lang="en">
 <head>
@@ -1151,7 +1161,13 @@ app.get('/reset-password', (req, res) => {
   <p id="msg" role="status"></p>
 </main>
 <script>
-  var TOKEN = ${JSON.stringify(rawToken)};
+  // The token is read from the URL fragment client-side, so it never reaches
+  // the server (fall back to the query string for older links).
+  var TOKEN = (function () {
+    var m = (location.hash || '').match(/token=([A-Za-z0-9_-]+)/);
+    if (m) return m[1];
+    try { return new URLSearchParams(location.search).get('token') || ''; } catch (e) { return ''; }
+  })();
   var form = document.getElementById('reset-form');
   var msg = document.getElementById('msg');
   var submit = document.getElementById('submit');

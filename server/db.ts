@@ -947,6 +947,14 @@ export class PostgresStore {
     );
   }
 
+  deletePasswordResetsForUser(userId: string): void {
+    this.enqueue(
+      `delete password resets for ${userId}`,
+      'DELETE FROM app_password_resets WHERE user_id = $1',
+      [userId]
+    );
+  }
+
   deleteExpiredPasswordResets(now: number): void {
     this.enqueue(
       'delete expired password resets',

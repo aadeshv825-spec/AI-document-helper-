@@ -50,7 +50,7 @@ function resetEnv(overrides: Record<string, string> = {}): Record<string, string
 
 function extractToken(email: any): string | null {
   const html: string = (email && email.html) || '';
-  const match = html.match(/\/reset-password\?token=([A-Za-z0-9_-]+)/);
+  const match = html.match(/\/reset-password[#?]token=([A-Za-z0-9_-]+)/);
   return match ? match[1] : null;
 }
 
@@ -124,7 +124,7 @@ test('reset link uses the trusted APP_URL, not the request host; token is single
     assert.ok(token && token.length >= 32, 'a reset token was delivered');
 
     const html: string = mock.state.lastBody.html;
-    assert.ok(html.includes(`${TRUSTED_APP_URL}/reset-password?token=${token}`), 'link is built from APP_URL');
+    assert.ok(html.includes(`${TRUSTED_APP_URL}/reset-password#token=${token}`), 'link is built from APP_URL');
     assert.ok(!html.includes('127.0.0.1'), 'link must not be derived from the request host');
 
     const ok = await api(server, 'POST', '/api/auth/password-reset/confirm', { token, newPassword: 'reset-pass-2' });

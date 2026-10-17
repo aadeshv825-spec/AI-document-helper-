@@ -518,6 +518,9 @@ export function deleteUserAccount(userId: string): void {
   users = users.filter((u) => u.id !== userId);
   sessions = sessions.filter((s) => s.userId !== userId);
   documents = documents.filter((d) => d.userId !== userId);
+  for (const [key, record] of passwordResetTokens.entries()) {
+    if (record.userId === userId) passwordResetTokens.delete(key);
+  }
 
   writeJsonFile(getFilePath('users.json'), users);
   writeJsonFile(getFilePath('sessions.json'), sessions);
@@ -526,6 +529,7 @@ export function deleteUserAccount(userId: string): void {
     pgStore.deleteUser(userId);
     pgStore.deleteSessionsForUser(userId);
     pgStore.deleteDocumentsForUser(userId);
+    pgStore.deletePasswordResetsForUser(userId);
   }
 }
 
