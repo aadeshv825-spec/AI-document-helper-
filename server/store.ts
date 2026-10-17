@@ -311,17 +311,23 @@ export function registerUser(name: string, email: string, password: string): { u
 export function authenticateUser(email: string, password: string): { user: StoredUser; token: string } {
   const normalizedEmail = email.trim().toLowerCase();
   const user = users.find((u) => u.email.toLowerCase() === normalizedEmail);
+  // One generic message for "no such account", "Google-only account" and
+  // "wrong password" so login cannot be used to enumerate registered emails.
+  const genericLoginError =
+    'Incorrect email or password. Please verify your credentials and try again.';
+
   if (!user) {
-    throw new Error('No account found with this email address.');
+    throw new Error(genericLoginError);
   }
 
   if (!user.passwordHash || !user.salt) {
-    throw new Error('This account was created with Google. Please use "Continue with Google" to sign in.');
+    // Google-only account: same generic message (see note above).
+    throw new Error(genericLoginError);
   }
 
   const valid = verifyHash(password, user.salt, user.passwordHash, user.passwordIterations);
   if (!valid) {
-    throw new Error('Incorrect password. Please verify your credentials and try again.');
+    throw new Error(genericLoginError);
   }
 
   const token = createSession(user.id);

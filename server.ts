@@ -945,17 +945,78 @@ interface PasswordResetToken {
 }
 const passwordResetTokens = new Map<string, PasswordResetToken>();
 
+// Drop expired reset tokens periodically so the map cannot grow unbounded.
+const passwordResetCleanupTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [key, record] of passwordResetTokens.entries()) {
+    if (record.expiresAt <= now) passwordResetTokens.delete(key);
+  }
+}, 5 * 60 * 1000);
+if (typeof passwordResetCleanupTimer.unref === 'function') passwordResetCleanupTimer.unref();
+
+// Password reset email delivery via Resend (https://resend.com).
+// Returns { sent: false, error } when delivery is not configured or fails, so a
+// caller can never report success without a real provider response.
+const RESEND_API_KEY = (process.env.RESEND_API_KEY || '').trim();
+const PASSWORD_RESET_EMAIL_FROM = (process.env.PASSWORD_RESET_EMAIL_FROM || '').trim();
+// Trusted public base URL used to build reset links. This must be an explicitly
+// configured production value; it is never derived from the request Host header.
+const PASSWORD_RESET_APP_URL = (process.env.APP_URL || '').replace(/\/+$/, '').trim();
+
+function isPasswordResetEmailConfigured(): boolean {
+  return Boolean(RESEND_API_KEY && PASSWORD_RESET_EMAIL_FROM && PASSWORD_RESET_APP_URL);
+}
+
+async function sendPasswordResetEmail(
+  toEmail: string,
+  resetUrl: string
+): Promise<{ sent: boolean; error?: string }> {
+  if (!isPasswordResetEmailConfigured()) {
+    return { sent: false, error: 'email-provider-not-configured' };
+  }
+  try {
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: PASSWORD_RESET_EMAIL_FROM,
+        to: [toEmail],
+        subject: 'Reset your AI Document Helper password',
+        html:
+          '<p>We received a request to reset your AI Document Helper password.</p>' +
+          `<p><a href="${resetUrl}">Choose a new password</a> (this link expires in 15 minutes).</p>` +
+          '<p>If you did not request this, you can safely ignore this email.</p>',
+      }),
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      return {
+        sent: false,
+        error: `resend-http-${response.status}${detail ? `: ${detail.slice(0, 200)}` : ''}`,
+      };
+    }
+    return { sent: true };
+  } catch (err: any) {
+    return { sent: false, error: `resend-request-failed: ${err?.message || String(err)}` };
+  }
+}
+
 app.get('/api/auth/password-reset/status', (req, res) => {
-  const isAvailable = Boolean(process.env.PASSWORD_RESET_EMAIL_FROM || process.env.SMTP_HOST || process.env.RESEND_API_KEY);
+  // Report availability for the provider that is actually implemented (Resend).
+  // The previous version also treated SMTP_HOST as "available" even though no
+  // SMTP code path exists, advertising a flow that could not send anything.
+  const isAvailable = isPasswordResetEmailConfigured();
   res.json({
     available: isAvailable,
     configured: isAvailable,
   });
 });
 
-app.post('/api/auth/password-reset/request', (req, res) => {
-  const isAvailable = Boolean(process.env.PASSWORD_RESET_EMAIL_FROM || process.env.SMTP_HOST || process.env.RESEND_API_KEY);
-  if (!isAvailable) {
+app.post('/api/auth/password-reset/request', async (req, res) => {
+  if (!isPasswordResetEmailConfigured()) {
     return res.status(503).json({
       error: 'Password reset via email is currently unavailable because an email delivery service has not been configured in the production environment. Please sign in with Google or contact support.',
       available: false,
@@ -976,9 +1037,23 @@ app.post('/api/auth/password-reset/request', (req, res) => {
       email: user.email,
       expiresAt: Date.now() + 15 * 60 * 1000,
     });
-    console.log(`[Auth] Password reset token dispatched for ${user.email}`);
+    // Build the reset link only from the trusted, explicitly configured APP_URL.
+    // It must never fall back to the request Host header, which an attacker can
+    // control in order to redirect the reset link to their own domain.
+    const resetUrl = `${PASSWORD_RESET_APP_URL}/reset-password?token=${rawToken}`;
+    const delivery = await sendPasswordResetEmail(user.email, resetUrl);
+    if (delivery.sent) {
+      console.log(`[Auth] Password reset email sent to ${user.email}`);
+    } else {
+      // The token is discarded if it could not be delivered, so we never leave
+      // an undeliverable reset token lying around in memory.
+      passwordResetTokens.delete(tokenHash);
+      console.warn(`[Auth] Password reset email NOT sent for ${user.email}: ${delivery.error}`);
+    }
   }
 
+  // Always the same response, whether or not the account exists and whether or
+  // not delivery succeeded, to avoid leaking account existence.
   res.json({
     success: true,
     message: 'If an account exists for this email address, password reset instructions have been sent.',
@@ -1001,7 +1076,7 @@ app.post('/api/auth/password-reset/confirm', (req, res) => {
   const user = getUserByEmail(record.email);
   if (!user) {
     passwordResetTokens.delete(tokenHash);
-    return res.status(400).json({ error: 'User account not found.' });
+    return res.status(400).json({ error: 'This password reset link is invalid or has expired. Please request a new one.' });
   }
 
   setUserPassword(user.id, newPassword);
@@ -1015,7 +1090,74 @@ app.post('/api/auth/password-reset/confirm', (req, res) => {
 app.get('/reset-password', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('X-Frame-Options', 'DENY');
-  res.send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Reset Password</title></head><body><div id="root">Reset Password</div></body></html>`);
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  const rawToken = typeof req.query.token === 'string' ? req.query.token : '';
+  res.send(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Reset Password - AI Document Helper</title>
+<style>
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:#0f172a; color:#e2e8f0; margin:0; display:flex; min-height:100vh; align-items:center; justify-content:center; }
+  main { width:100%; max-width:360px; padding:24px; }
+  h1 { font-size:1.25rem; margin:0 0 16px; }
+  label { display:block; font-size:.85rem; margin:12px 0 4px; color:#94a3b8; }
+  input { width:100%; box-sizing:border-box; padding:12px; border-radius:10px; border:1px solid #334155; background:#1e293b; color:#e2e8f0; font-size:1rem; }
+  button { width:100%; margin-top:20px; padding:13px; border:0; border-radius:10px; background:#6366f1; color:#fff; font-size:1rem; font-weight:600; }
+  button:disabled { opacity:.6; }
+  #msg { margin-top:16px; font-size:.9rem; line-height:1.4; }
+  .ok { color:#4ade80; } .err { color:#f87171; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Choose a new password</h1>
+  <form id="reset-form" novalidate>
+    <label for="pw">New password (min 6 characters)</label>
+    <input id="pw" type="password" autocomplete="new-password" minlength="6" required />
+    <label for="pw2">Confirm new password</label>
+    <input id="pw2" type="password" autocomplete="new-password" minlength="6" required />
+    <button id="submit" type="submit">Set new password</button>
+  </form>
+  <p id="msg" role="status"></p>
+</main>
+<script>
+  var TOKEN = ${JSON.stringify(rawToken)};
+  var form = document.getElementById('reset-form');
+  var msg = document.getElementById('msg');
+  var submit = document.getElementById('submit');
+  function setMsg(text, ok) { msg.textContent = text; msg.className = ok ? 'ok' : 'err'; }
+  if (!TOKEN) setMsg('This reset link is missing its token. Please request a new reset email.', false);
+  form.addEventListener('submit', function (event) {
+    event.preventDefault();
+    if (!TOKEN) return;
+    var pw = document.getElementById('pw').value;
+    var pw2 = document.getElementById('pw2').value;
+    if (pw.length < 6) { setMsg('Password must be at least 6 characters.', false); return; }
+    if (pw !== pw2) { setMsg('The two passwords do not match.', false); return; }
+    submit.disabled = true;
+    setMsg('Updating your password...', true);
+    fetch('/api/auth/password-reset/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: TOKEN, newPassword: pw })
+    })
+      .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+      .then(function (r) {
+        if (r.ok && r.body && r.body.success) {
+          setMsg('Your password has been reset. You can now sign in with your new password.', true);
+          form.reset();
+        } else {
+          setMsg((r.body && r.body.error) || 'Could not reset your password. Please request a new link.', false);
+          submit.disabled = false;
+        }
+      })
+      .catch(function () { setMsg('Network error. Please try again.', false); submit.disabled = false; });
+  });
+</script>
+</body>
+</html>`);
 });
 
 // --- GOOGLE OAUTH 2.0 INTEGRATION ---
