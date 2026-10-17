@@ -849,6 +849,65 @@ export async function deletePendingPurchase(purchaseToken: string): Promise<void
   writeJsonFile(getFilePath('pending-purchases.json'), pendingPurchases);
 }
 
+// ---------------------------------------------------------------
+// PASSWORD RESET TOKENS
+// ---------------------------------------------------------------
+// Persisted in PostgreSQL when configured (survives restarts and is shared
+// across instances); falls back to an in-memory map in JSON/dev mode.
+export interface PasswordResetTokenRecord {
+  tokenHash: string;
+  userId: string;
+  email: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+let passwordResetTokens = new Map<string, PasswordResetTokenRecord>();
+
+export async function savePasswordResetToken(
+  record: PasswordResetTokenRecord,
+  timeoutMs = 2500
+): Promise<boolean> {
+  if (pgStore) {
+    const mark = getWriteMark();
+    pgStore.insertPasswordReset(record);
+    return await confirmPersisted(mark, timeoutMs);
+  }
+  passwordResetTokens.set(record.tokenHash, record);
+  return true;
+}
+
+/**
+ * Consumes a reset token exactly once. In PostgreSQL the delete-and-return is
+ * a single atomic statement, so concurrent confirmations cannot both succeed.
+ */
+export async function consumePasswordResetToken(
+  tokenHash: string
+): Promise<PasswordResetTokenRecord | null> {
+  if (pgStore) {
+    return pgStore.consumePasswordReset(tokenHash);
+  }
+  const record = passwordResetTokens.get(tokenHash);
+  if (record) passwordResetTokens.delete(tokenHash);
+  return record || null;
+}
+
+export async function deletePasswordResetToken(tokenHash: string): Promise<void> {
+  if (pgStore) {
+    pgStore.deletePasswordReset(tokenHash);
+  }
+  passwordResetTokens.delete(tokenHash);
+}
+
+export async function purgeExpiredPasswordResetTokens(now = Date.now()): Promise<void> {
+  if (pgStore) {
+    pgStore.deleteExpiredPasswordResets(now);
+  }
+  for (const [key, record] of passwordResetTokens.entries()) {
+    if (record.expiresAt <= now) passwordResetTokens.delete(key);
+  }
+}
+
 export async function checkDatabaseReadiness(): Promise<{ ready: boolean; configured: boolean; error?: string }> {
   const dbUrl = (process.env.DATABASE_URL || '').trim();
   const requireDb = process.env.REQUIRE_DATABASE === 'true';

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import pg from 'pg';
-import { startTestServer, api, registerUser, freePort, type TestServer } from './helpers.ts';
+import { startTestServer, api, registerUser, freePort, startMockResend, extractResetToken, type TestServer } from './helpers.ts';
 import { PostgresStore } from '../server/db.ts';
 
 const BASE_URL = process.env.TEST_DATABASE_URL || '';
@@ -294,5 +294,137 @@ test('graceful shutdown flushes in-flight pending writes before exiting', { skip
     proxy.resume();
     await server.stop();
     await proxy.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Persistent (PostgreSQL-backed) password-reset tokens
+// ---------------------------------------------------------------------------
+
+const RESET_ENV_BASE = {
+  APP_URL: 'https://app.example.test',
+  RESEND_API_KEY: 'test-resend-key',
+  PASSWORD_RESET_EMAIL_FROM: 'AI Document Helper <no-reply@example.test>',
+};
+
+test('reset tokens are stored in PostgreSQL: they survive a restart and are single-use', { skip, timeout: 60000 }, async () => {
+  const mock = await startMockResend();
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adh-pr-pg-'));
+  const env = { DATABASE_URL: dbUrl, REQUIRE_DATABASE: 'true', ...RESET_ENV_BASE, RESEND_API_URL: mock.url };
+  let server = await startTestServer(env, { dataDir });
+  try {
+    const u = await registerUser(server, 'original-pass-1');
+
+    const req = await api(server, 'POST', '/api/auth/password-reset/request', { email: u.email });
+    assert.equal(req.status, 200);
+    assert.equal(mock.state.calls, 1);
+    const token = extractResetToken(mock.state.lastBody);
+    assert.ok(token && token.length >= 32, 'a reset token was delivered');
+
+    const stored = await query('SELECT count(*)::int AS n FROM app_password_resets WHERE user_id = $1', [u.user.id]);
+    assert.equal(stored.rows[0].n, 1, 'the reset token is persisted in PostgreSQL');
+
+    // Restart the server: the token must still work, which proves it lives in the
+    // database rather than in process memory.
+    await server.stop('SIGTERM');
+    server = await startTestServer(env, { dataDir });
+
+    const ok = await api(server, 'POST', '/api/auth/password-reset/confirm', { token, newPassword: 'reset-pass-2' });
+    assert.equal(ok.status, 200);
+
+    const reuse = await api(server, 'POST', '/api/auth/password-reset/confirm', { token, newPassword: 'reset-pass-3' });
+    assert.equal(reuse.status, 400, 'a consumed token cannot be reused');
+
+    const left = await query('SELECT count(*)::int AS n FROM app_password_resets WHERE user_id = $1', [u.user.id]);
+    assert.equal(left.rows[0].n, 0, 'the consumed token is removed from the database');
+
+    assert.equal((await api(server, 'POST', '/api/auth/login', { email: u.email, password: 'reset-pass-2' })).status, 200);
+    assert.equal((await api(server, 'POST', '/api/auth/login', { email: u.email, password: 'original-pass-1' })).status, 401);
+  } finally {
+    await server.stop();
+    await mock.close();
+  }
+});
+
+test('invalid and expired reset tokens are rejected and removed', { skip, timeout: 60000 }, async () => {
+  const mock = await startMockResend();
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adh-pr-exp-'));
+  const env = { DATABASE_URL: dbUrl, REQUIRE_DATABASE: 'true', ...RESET_ENV_BASE, RESEND_API_URL: mock.url, PASSWORD_RESET_TTL_MS: '200' };
+  const server = await startTestServer(env, { dataDir });
+  try {
+    const u = await registerUser(server, 'correct-horse-1');
+
+    const invalid = await api(server, 'POST', '/api/auth/password-reset/confirm', { token: 'a'.repeat(64), newPassword: 'whatever-123' });
+    assert.equal(invalid.status, 400, 'an unknown token is rejected');
+
+    const req = await api(server, 'POST', '/api/auth/password-reset/request', { email: u.email });
+    assert.equal(req.status, 200);
+    const token = extractResetToken(mock.state.lastBody);
+    assert.ok(token);
+
+    await new Promise((r) => setTimeout(r, 500));
+
+    const expired = await api(server, 'POST', '/api/auth/password-reset/confirm', { token, newPassword: 'expired-pass-1' });
+    assert.equal(expired.status, 400, 'an expired token is rejected');
+    assert.equal((await api(server, 'POST', '/api/auth/login', { email: u.email, password: 'correct-horse-1' })).status, 200);
+
+    const left = await query('SELECT count(*)::int AS n FROM app_password_resets WHERE user_id = $1', [u.user.id]);
+    assert.equal(left.rows[0].n, 0, 'the expired token is removed, so it cannot be replayed');
+  } finally {
+    await server.stop();
+    await mock.close();
+  }
+});
+
+test('a too-short password is rejected without consuming the reset token', { skip, timeout: 60000 }, async () => {
+  const mock = await startMockResend();
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adh-pr-short-'));
+  const env = { DATABASE_URL: dbUrl, REQUIRE_DATABASE: 'true', ...RESET_ENV_BASE, RESEND_API_URL: mock.url };
+  const server = await startTestServer(env, { dataDir });
+  try {
+    const u = await registerUser(server, 'original-pass-1');
+    const req = await api(server, 'POST', '/api/auth/password-reset/request', { email: u.email });
+    assert.equal(req.status, 200);
+    const token = extractResetToken(mock.state.lastBody);
+    assert.ok(token);
+
+    const short = await api(server, 'POST', '/api/auth/password-reset/confirm', { token, newPassword: '123' });
+    assert.equal(short.status, 400);
+
+    // Validation runs before consumption, so the token is still usable.
+    const ok = await api(server, 'POST', '/api/auth/password-reset/confirm', { token, newPassword: 'good-pass-1' });
+    assert.equal(ok.status, 200);
+  } finally {
+    await server.stop();
+    await mock.close();
+  }
+});
+
+test('concurrent reset confirmations allow exactly one success', { skip, timeout: 60000 }, async () => {
+  const mock = await startMockResend();
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adh-pr-conc-'));
+  const env = { DATABASE_URL: dbUrl, REQUIRE_DATABASE: 'true', ...RESET_ENV_BASE, RESEND_API_URL: mock.url };
+  const server = await startTestServer(env, { dataDir });
+  try {
+    const u = await registerUser(server, 'original-pass-1');
+    const req = await api(server, 'POST', '/api/auth/password-reset/request', { email: u.email });
+    assert.equal(req.status, 200);
+    const token = extractResetToken(mock.state.lastBody);
+    assert.ok(token);
+
+    const attempts = await Promise.all(
+      Array.from({ length: 8 }, (_, i) => api(server, 'POST', '/api/auth/password-reset/confirm', { token, newPassword: `race-pass-${i}` }))
+    );
+    assert.equal(attempts.filter((r) => r.status === 200).length, 1, 'exactly one concurrent confirmation succeeds');
+    assert.equal(attempts.filter((r) => r.status === 400).length, 7, 'all other concurrent confirmations are rejected');
+
+    let accepted = 0;
+    for (let i = 0; i < 8; i += 1) {
+      if ((await api(server, 'POST', '/api/auth/login', { email: u.email, password: `race-pass-${i}` })).status === 200) accepted += 1;
+    }
+    assert.equal(accepted, 1, 'exactly one new password takes effect');
+  } finally {
+    await server.stop();
+    await mock.close();
   }
 });

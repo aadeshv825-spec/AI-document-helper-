@@ -190,3 +190,21 @@ test('login failures do not reveal whether an account exists', { timeout: 60000 
     await server.stop();
   }
 });
+
+test('password reset requests are rate limited', { timeout: 60000 }, async () => {
+  // Own server, so exhausting the limiter cannot affect other tests.
+  const server = await startTestServer({}, { dataDir: tmpDir('adh-pr-ratelimit-') });
+  try {
+    let limited = false;
+    for (let i = 0; i < 140; i += 1) {
+      const r = await api(server, 'POST', '/api/auth/password-reset/request', { email: 'nobody@example.test' });
+      if (r.status === 429) {
+        limited = true;
+        break;
+      }
+    }
+    assert.equal(limited, true, 'the password reset request endpoint is rate limited');
+  } finally {
+    await server.stop();
+  }
+});

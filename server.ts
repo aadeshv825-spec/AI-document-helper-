@@ -50,6 +50,10 @@ import {
   savePendingPurchase,
   getPendingPurchase,
   deletePendingPurchase,
+  savePasswordResetToken,
+  consumePasswordResetToken,
+  deletePasswordResetToken,
+  purgeExpiredPasswordResetTokens,
 } from './server/store.ts';
 import type { StoredUser, GooglePlayPurchaseRecord } from './server/store.ts';
 import {
@@ -937,20 +941,10 @@ app.post('/api/auth/change-password', (req, res) => {
   }
 });
 
-// Password reset token store
-interface PasswordResetToken {
-  tokenHash: string;
-  email: string;
-  expiresAt: number;
-}
-const passwordResetTokens = new Map<string, PasswordResetToken>();
-
-// Drop expired reset tokens periodically so the map cannot grow unbounded.
+// Reset tokens are persisted by the store layer (PostgreSQL when configured,
+// otherwise an in-memory map). Drop expired ones periodically.
 const passwordResetCleanupTimer = setInterval(() => {
-  const now = Date.now();
-  for (const [key, record] of passwordResetTokens.entries()) {
-    if (record.expiresAt <= now) passwordResetTokens.delete(key);
-  }
+  void purgeExpiredPasswordResetTokens();
 }, 5 * 60 * 1000);
 if (typeof passwordResetCleanupTimer.unref === 'function') passwordResetCleanupTimer.unref();
 
@@ -1022,6 +1016,37 @@ app.get('/api/auth/password-reset/status', (req, res) => {
   });
 });
 
+async function issuePasswordResetForUser(user: { id: string; email: string }): Promise<void> {
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+  const now = Date.now();
+  const stored = await savePasswordResetToken({
+    tokenHash,
+    userId: user.id,
+    email: user.email,
+    createdAt: now,
+    expiresAt: now + PASSWORD_RESET_TTL_MS,
+  });
+  if (!stored) {
+    // A link that was never persisted would be a lie, so do not send one.
+    console.warn(`[Auth] Password reset token could not be persisted for ${user.email}; no email sent.`);
+    return;
+  }
+  // Build the reset link only from the trusted, explicitly configured APP_URL.
+  // It must never fall back to the request Host header, which an attacker can
+  // control in order to redirect the reset link to their own domain.
+  const resetUrl = `${PASSWORD_RESET_APP_URL}/reset-password?token=${rawToken}`;
+  const delivery = await sendPasswordResetEmail(user.email, resetUrl);
+  if (delivery.sent) {
+    console.log(`[Auth] Password reset email sent to ${user.email}`);
+  } else {
+    // Discard the token if it could not be delivered, so we never leave an
+    // undeliverable reset token lying around.
+    await deletePasswordResetToken(tokenHash);
+    console.warn(`[Auth] Password reset email NOT sent for ${user.email}: ${delivery.error}`);
+  }
+}
+
 app.post('/api/auth/password-reset/request', async (req, res) => {
   if (!isPasswordResetEmailConfigured()) {
     return res.status(503).json({
@@ -1037,25 +1062,10 @@ app.post('/api/auth/password-reset/request', async (req, res) => {
 
   const user = getUserByEmail(email);
   if (user) {
-    const rawToken = crypto.randomBytes(32).toString('hex');
-    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
-    passwordResetTokens.set(tokenHash, {
-      tokenHash,
-      email: user.email,
-      expiresAt: Date.now() + PASSWORD_RESET_TTL_MS,
-    });
-    // Build the reset link only from the trusted, explicitly configured APP_URL.
-    // It must never fall back to the request Host header, which an attacker can
-    // control in order to redirect the reset link to their own domain.
-    const resetUrl = `${PASSWORD_RESET_APP_URL}/reset-password?token=${rawToken}`;
-    const delivery = await sendPasswordResetEmail(user.email, resetUrl);
-    if (delivery.sent) {
-      console.log(`[Auth] Password reset email sent to ${user.email}`);
-    } else {
-      // The token is discarded if it could not be delivered, so we never leave
-      // an undeliverable reset token lying around in memory.
-      passwordResetTokens.delete(tokenHash);
-      console.warn(`[Auth] Password reset email NOT sent for ${user.email}: ${delivery.error}`);
+    try {
+      await issuePasswordResetForUser(user);
+    } catch (err: any) {
+      console.error('[Auth] Password reset request failed:', err?.message || err);
     }
   }
 
@@ -1067,31 +1077,35 @@ app.post('/api/auth/password-reset/request', async (req, res) => {
   });
 });
 
-app.post('/api/auth/password-reset/confirm', (req, res) => {
+app.post('/api/auth/password-reset/confirm', async (req, res) => {
   const { token, newPassword } = req.body;
   if (!token || !newPassword || typeof newPassword !== 'string' || newPassword.length < 6) {
     return res.status(400).json({ error: 'Invalid reset token or password too short (minimum 6 characters).' });
   }
 
-  const tokenHash = crypto.createHash('sha256').update(token.trim()).digest('hex');
-  const record = passwordResetTokens.get(tokenHash);
-  if (!record || record.expiresAt <= Date.now()) {
-    passwordResetTokens.delete(tokenHash);
-    return res.status(400).json({ error: 'This password reset link is invalid or has expired. Please request a new one.' });
-  }
+  try {
+    const tokenHash = crypto.createHash('sha256').update(token.trim()).digest('hex');
+    // Consume the token atomically: it is removed whether or not it is still
+    // valid, so it can never be used twice (including by concurrent requests).
+    const record = await consumePasswordResetToken(tokenHash);
+    if (!record || record.expiresAt <= Date.now()) {
+      return res.status(400).json({ error: 'This password reset link is invalid or has expired. Please request a new one.' });
+    }
 
-  const user = getUserByEmail(record.email);
-  if (!user) {
-    passwordResetTokens.delete(tokenHash);
-    return res.status(400).json({ error: 'This password reset link is invalid or has expired. Please request a new one.' });
-  }
+    const user = getUserById(record.userId) || getUserByEmail(record.email);
+    if (!user) {
+      return res.status(400).json({ error: 'This password reset link is invalid or has expired. Please request a new one.' });
+    }
 
-  setUserPassword(user.id, newPassword);
-  passwordResetTokens.delete(tokenHash);
-  res.json({
-    success: true,
-    message: 'Your password has been reset successfully. Please sign in with your new password.',
-  });
+    setUserPassword(user.id, newPassword);
+    res.json({
+      success: true,
+      message: 'Your password has been reset successfully. Please sign in with your new password.',
+    });
+  } catch (err: any) {
+    console.error('[Auth] Password reset confirmation failed:', err?.message || err);
+    res.status(500).json({ error: 'Could not reset your password right now. Please try again.' });
+  }
 });
 
 app.get('/reset-password', (req, res) => {
@@ -2390,13 +2404,17 @@ async function startServer() {
   process.on('SIGINT', () => { void shutdown('SIGINT'); });
 
   server.on('error', (err: any) => {
-    if (err && err.code === 'EADDRINUSE' && PORT !== 3000) {
+    if (err && err.code === 'EADDRINUSE' && PORT !== 3000 && process.env.DISABLE_PORT_FALLBACK !== 'true') {
       console.warn(`[Server] Port ${PORT} already in use, falling back to port 3000...`);
       app.listen(3000, '0.0.0.0', () => {
         console.log(`Document Helper server running at http://0.0.0.0:3000`);
       });
     } else {
       console.error('[Server] Listen error:', err);
+      // In tests the port fallback is disabled so a port collision fails fast
+      // instead of silently binding a different port (which would leave the
+      // harness talking to the wrong server).
+      if (process.env.DISABLE_PORT_FALLBACK === 'true') process.exit(1);
     }
   });
 }
