@@ -131,6 +131,7 @@ async function startProxy(targetUrl: string) {
   const target = new URL(targetUrl);
   const sockets = new Set<net.Socket>();
   let down = false;
+  let paused = false;
   const port = await freePort();
   const server = net.createServer((client) => {
     if (down) return client.destroy();
@@ -138,6 +139,10 @@ async function startProxy(targetUrl: string) {
     sockets.add(client);
     sockets.add(upstream);
     client.pipe(upstream).pipe(client);
+    if (paused) {
+      client.pause();
+      upstream.pause();
+    }
     const cleanup = () => {
       client.destroy();
       upstream.destroy();
@@ -158,6 +163,16 @@ async function startProxy(targetUrl: string) {
     setDown(value: boolean) {
       down = value;
       if (value) for (const s of sockets) s.destroy();
+    },
+    // Hold bytes in both directions without closing sockets, so in-flight
+    // queries hang and queued writes stay pending. `resume()` lets them flow.
+    pause() {
+      paused = true;
+      for (const s of sockets) s.pause();
+    },
+    resume() {
+      paused = false;
+      for (const s of sockets) s.resume();
     },
     close: () => new Promise<void>((r) => server.close(() => r())),
   };
@@ -216,29 +231,57 @@ test('database outage: saves are not reported as successful; queued writes apply
 });
 
 test('graceful shutdown flushes in-flight pending writes before exiting', { skip }, async () => {
+  // Route the database through a proxy we can hold, so writes stay queued and
+  // genuinely in flight when the shutdown signal arrives.
+  const proxy = await startProxy(dbUrl);
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adh-shutdown-'));
-  const server = await startTestServer({ DATABASE_URL: dbUrl, REQUIRE_DATABASE: 'true' }, { dataDir });
+  const server = await startTestServer({ DATABASE_URL: proxy.url, REQUIRE_DATABASE: 'true' }, { dataDir });
 
   try {
     const u = await registerUser(server);
 
-    // Dispatch multiple writes rapidly without awaiting completion, then trigger SIGTERM immediately
-    const titles = Array.from({ length: 15 }, (_, i) => `Inflight ${i}`);
-    const writePromises = titles.map((title, i) =>
-      api(server, 'POST', '/api/documents', { title, type: 'ai-writer', fullContent: `inflight-content-${i}` }, u.token)
-    );
+    // Hold database traffic so the writes cannot complete yet.
+    proxy.pause();
 
-    // Immediately signal graceful shutdown while writes are in flight
+    const titles = Array.from({ length: 15 }, (_, i) => `Inflight ${i}`);
+    const writePromises = titles.map((title, i) => {
+      const promise = api(server, 'POST', '/api/documents', { title, type: 'ai-writer', fullContent: `inflight-content-${i}` }, u.token);
+      // Attach a rejection handler immediately: if the server closes the socket
+      // before the response arrives, an unhandled rejection would fail the run
+      // instead of being collected by allSettled() below.
+      promise.catch(() => {});
+      return promise;
+    });
+
+    // Wait until every request has actually reached the server and been queued as
+    // a pending write. The database is held and the write queue is ordered, so
+    // storage.pendingWrites climbs to 15 and stays there.
+    const deadline = Date.now() + 20000;
+    let pending = 0;
+    while (Date.now() < deadline) {
+      const health = await api(server, 'GET', '/api/health');
+      pending = health.data?.storage?.pendingWrites ?? 0;
+      if (pending >= titles.length) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.equal(pending, titles.length, 'all in-flight writes reached the server and are queued');
+
+    // Release the database and immediately request a graceful shutdown: the
+    // server must flush every queued write before exiting.
+    proxy.resume();
     const exitCode = await server.stop('SIGTERM');
     assert.equal(exitCode, 0, 'server exits with code 0 on successful flush');
 
-    // Wait for promise rejections or responses (some may have finished or aborted on closed socket)
+    // Collect responses/rejections (some requests may have completed or been
+    // aborted on the closed socket).
     await Promise.allSettled(writePromises);
 
-    // Directly query PostgreSQL to verify all documents were durably written to the database
+    // Directly query PostgreSQL to verify all documents were durably written.
     const rows = await query('SELECT count(*)::int AS n FROM app_documents WHERE user_id = $1', [u.user.id]);
     assert.equal(rows.rows[0].n, 15, 'all in-flight writes were successfully flushed to PostgreSQL');
   } finally {
+    proxy.resume();
     await server.stop();
+    await proxy.close();
   }
 });

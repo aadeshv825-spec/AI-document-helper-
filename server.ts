@@ -962,6 +962,13 @@ const PASSWORD_RESET_EMAIL_FROM = (process.env.PASSWORD_RESET_EMAIL_FROM || '').
 // Trusted public base URL used to build reset links. This must be an explicitly
 // configured production value; it is never derived from the request Host header.
 const PASSWORD_RESET_APP_URL = (process.env.APP_URL || '').replace(/\/+$/, '').trim();
+// Resend API endpoint. Overridable so tests (and self-hosted setups) can point
+// at a mock or alternate endpoint instead of the public Resend service.
+const RESEND_API_URL = (process.env.RESEND_API_URL || 'https://api.resend.com/emails').trim();
+// Lifetime of a reset token. Overridable so the expiry behaviour can be tested
+// without waiting the full default of 15 minutes.
+const PASSWORD_RESET_TTL_MS =
+  Number(process.env.PASSWORD_RESET_TTL_MS) > 0 ? Number(process.env.PASSWORD_RESET_TTL_MS) : 15 * 60 * 1000;
 
 function isPasswordResetEmailConfigured(): boolean {
   return Boolean(RESEND_API_KEY && PASSWORD_RESET_EMAIL_FROM && PASSWORD_RESET_APP_URL);
@@ -975,7 +982,7 @@ async function sendPasswordResetEmail(
     return { sent: false, error: 'email-provider-not-configured' };
   }
   try {
-    const response = await fetch('https://api.resend.com/emails', {
+    const response = await fetch(RESEND_API_URL, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${RESEND_API_KEY}`,
@@ -1035,7 +1042,7 @@ app.post('/api/auth/password-reset/request', async (req, res) => {
     passwordResetTokens.set(tokenHash, {
       tokenHash,
       email: user.email,
-      expiresAt: Date.now() + 15 * 60 * 1000,
+      expiresAt: Date.now() + PASSWORD_RESET_TTL_MS,
     });
     // Build the reset link only from the trusted, explicitly configured APP_URL.
     // It must never fall back to the request Host header, which an attacker can
