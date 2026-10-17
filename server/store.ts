@@ -267,8 +267,12 @@ export async function initStore(): Promise<void> {
   }
 }
 
-// Initial auto-load at module import
-void initStore().catch((err) => {
+// Initial auto-load at module import. The server awaits `storeReady` before it
+// starts listening, so requests are never served against an uninitialized store
+// (migrations + cache hydration), and startup fails loudly when a required
+// database cannot be reached.
+export const storeReady: Promise<void> = initStore();
+void storeReady.catch((err) => {
   console.warn('[Store] Initial auto-load note:', err?.message || err);
 });
 
@@ -311,17 +315,23 @@ export function registerUser(name: string, email: string, password: string): { u
 export function authenticateUser(email: string, password: string): { user: StoredUser; token: string } {
   const normalizedEmail = email.trim().toLowerCase();
   const user = users.find((u) => u.email.toLowerCase() === normalizedEmail);
+  // One generic message for "no such account", "Google-only account" and
+  // "wrong password" so login cannot be used to enumerate registered emails.
+  const genericLoginError =
+    'Incorrect email or password. Please verify your credentials and try again.';
+
   if (!user) {
-    throw new Error('No account found with this email address.');
+    throw new Error(genericLoginError);
   }
 
   if (!user.passwordHash || !user.salt) {
-    throw new Error('This account was created with Google. Please use "Continue with Google" to sign in.');
+    // Google-only account: same generic message (see note above).
+    throw new Error(genericLoginError);
   }
 
   const valid = verifyHash(password, user.salt, user.passwordHash, user.passwordIterations);
   if (!valid) {
-    throw new Error('Incorrect password. Please verify your credentials and try again.');
+    throw new Error(genericLoginError);
   }
 
   const token = createSession(user.id);
@@ -508,6 +518,9 @@ export function deleteUserAccount(userId: string): void {
   users = users.filter((u) => u.id !== userId);
   sessions = sessions.filter((s) => s.userId !== userId);
   documents = documents.filter((d) => d.userId !== userId);
+  for (const [key, record] of passwordResetTokens.entries()) {
+    if (record.userId === userId) passwordResetTokens.delete(key);
+  }
 
   writeJsonFile(getFilePath('users.json'), users);
   writeJsonFile(getFilePath('sessions.json'), sessions);
@@ -516,6 +529,7 @@ export function deleteUserAccount(userId: string): void {
     pgStore.deleteUser(userId);
     pgStore.deleteSessionsForUser(userId);
     pgStore.deleteDocumentsForUser(userId);
+    pgStore.deletePasswordResetsForUser(userId);
   }
 }
 
@@ -841,6 +855,65 @@ export async function deletePendingPurchase(purchaseToken: string): Promise<void
   }
   delete pendingPurchases[purchaseToken];
   writeJsonFile(getFilePath('pending-purchases.json'), pendingPurchases);
+}
+
+// ---------------------------------------------------------------
+// PASSWORD RESET TOKENS
+// ---------------------------------------------------------------
+// Persisted in PostgreSQL when configured (survives restarts and is shared
+// across instances); falls back to an in-memory map in JSON/dev mode.
+export interface PasswordResetTokenRecord {
+  tokenHash: string;
+  userId: string;
+  email: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+let passwordResetTokens = new Map<string, PasswordResetTokenRecord>();
+
+export async function savePasswordResetToken(
+  record: PasswordResetTokenRecord,
+  timeoutMs = 2500
+): Promise<boolean> {
+  if (pgStore) {
+    const mark = getWriteMark();
+    pgStore.insertPasswordReset(record);
+    return await confirmPersisted(mark, timeoutMs);
+  }
+  passwordResetTokens.set(record.tokenHash, record);
+  return true;
+}
+
+/**
+ * Consumes a reset token exactly once. In PostgreSQL the delete-and-return is
+ * a single atomic statement, so concurrent confirmations cannot both succeed.
+ */
+export async function consumePasswordResetToken(
+  tokenHash: string
+): Promise<PasswordResetTokenRecord | null> {
+  if (pgStore) {
+    return pgStore.consumePasswordReset(tokenHash);
+  }
+  const record = passwordResetTokens.get(tokenHash);
+  if (record) passwordResetTokens.delete(tokenHash);
+  return record || null;
+}
+
+export async function deletePasswordResetToken(tokenHash: string): Promise<void> {
+  if (pgStore) {
+    pgStore.deletePasswordReset(tokenHash);
+  }
+  passwordResetTokens.delete(tokenHash);
+}
+
+export async function purgeExpiredPasswordResetTokens(now = Date.now()): Promise<void> {
+  if (pgStore) {
+    pgStore.deleteExpiredPasswordResets(now);
+  }
+  for (const [key, record] of passwordResetTokens.entries()) {
+    if (record.expiresAt <= now) passwordResetTokens.delete(key);
+  }
 }
 
 export async function checkDatabaseReadiness(): Promise<{ ready: boolean; configured: boolean; error?: string }> {
