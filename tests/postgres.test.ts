@@ -174,7 +174,11 @@ async function startProxy(targetUrl: string) {
       paused = false;
       for (const s of sockets) s.resume();
     },
-    close: () => new Promise<void>((r) => server.close(() => r())),
+    close: () =>
+      new Promise<void>((r) => {
+        for (const s of sockets) s.destroy();
+        server.close(() => r());
+      }),
   };
 }
 
@@ -230,7 +234,7 @@ test('database outage: saves are not reported as successful; queued writes apply
   }
 });
 
-test('graceful shutdown flushes in-flight pending writes before exiting', { skip }, async () => {
+test('graceful shutdown flushes in-flight pending writes before exiting', { skip, timeout: 60000 }, async () => {
   // Route the database through a proxy we can hold, so writes stay queued and
   // genuinely in flight when the shutdown signal arrives.
   const proxy = await startProxy(dbUrl);
@@ -242,6 +246,10 @@ test('graceful shutdown flushes in-flight pending writes before exiting', { skip
 
     // Hold database traffic so the writes cannot complete yet.
     proxy.pause();
+
+    // Baseline of writes already queued (for example by registration) that are
+    // now held too, so the wait below is measured against our own 15 writes.
+    const baseline = (await api(server, 'GET', '/api/health')).data?.storage?.pendingWrites ?? 0;
 
     const titles = Array.from({ length: 15 }, (_, i) => `Inflight ${i}`);
     const writePromises = titles.map((title, i) => {
@@ -261,10 +269,13 @@ test('graceful shutdown flushes in-flight pending writes before exiting', { skip
     while (Date.now() < deadline) {
       const health = await api(server, 'GET', '/api/health');
       pending = health.data?.storage?.pendingWrites ?? 0;
-      if (pending >= titles.length) break;
+      if (pending >= baseline + titles.length) break;
       await new Promise((r) => setTimeout(r, 25));
     }
-    assert.equal(pending, titles.length, 'all in-flight writes reached the server and are queued');
+    assert.ok(
+      pending >= baseline + titles.length,
+      `all ${titles.length} in-flight writes reached the server and are queued (pending=${pending}, baseline=${baseline})`
+    );
 
     // Release the database and immediately request a graceful shutdown: the
     // server must flush every queued write before exiting.

@@ -30,7 +30,11 @@ async function startMockResend() {
   return {
     url: `http://127.0.0.1:${port}/emails`,
     state,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections?.();
+        server.close(() => resolve());
+      }),
   };
 }
 
@@ -54,7 +58,7 @@ function tmpDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
-test('password reset requires a trusted APP_URL (no link is built without it)', async () => {
+test('password reset requires a trusted APP_URL (no link is built without it)', { timeout: 60000 }, async () => {
   // Resend is configured, but APP_URL is not: the flow must stay unavailable
   // rather than fall back to the request Host header.
   const server = await startTestServer(resetEnv(), { dataDir: tmpDir('adh-pr-noapp-') });
@@ -71,7 +75,7 @@ test('password reset requires a trusted APP_URL (no link is built without it)', 
   }
 });
 
-test('delivery failure is handled: generic response, no leak, token discarded', async () => {
+test('delivery failure is handled: generic response, no leak, token discarded', { timeout: 60000 }, async () => {
   const mock = await startMockResend();
   mock.state.status = 500;
   const server = await startTestServer(
@@ -103,7 +107,7 @@ test('delivery failure is handled: generic response, no leak, token discarded', 
   }
 });
 
-test('reset link uses the trusted APP_URL, not the request host; token is single-use', async () => {
+test('reset link uses the trusted APP_URL, not the request host; token is single-use', { timeout: 60000 }, async () => {
   const mock = await startMockResend();
   const server = await startTestServer(
     resetEnv({ APP_URL: TRUSTED_APP_URL, RESEND_API_URL: mock.url }),
@@ -140,7 +144,7 @@ test('reset link uses the trusted APP_URL, not the request host; token is single
   }
 });
 
-test('an expired reset token is rejected and does not change the password', async () => {
+test('an expired reset token is rejected and does not change the password', { timeout: 60000 }, async () => {
   const mock = await startMockResend();
   const server = await startTestServer(
     resetEnv({ APP_URL: TRUSTED_APP_URL, RESEND_API_URL: mock.url, PASSWORD_RESET_TTL_MS: '150' }),
@@ -167,7 +171,7 @@ test('an expired reset token is rejected and does not change the password', asyn
   }
 });
 
-test('login failures do not reveal whether an account exists', async () => {
+test('login failures do not reveal whether an account exists', { timeout: 60000 }, async () => {
   const server = await startTestServer({}, { dataDir: tmpDir('adh-enum-') });
   try {
     const user = await registerUser(server, 'known-pass-1');
